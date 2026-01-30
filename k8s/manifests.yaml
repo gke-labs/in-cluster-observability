@@ -31,16 +31,24 @@ spec:
       - name: in-cluster-observability-agent
         image: in-cluster-observability-agent:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
         ports:
         - containerPort: 8080
         volumeMounts:
         - name: proc
           mountPath: /proc
           readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
       volumes:
       - name: proc
         hostPath:
           path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
 ---
 apiVersion: v1
 kind: Service

@@ -19,9 +19,8 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o in-cluster-observability-agent main.go
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static
 WORKDIR /
 COPY --from=builder /app/in-cluster-observability-agent .
-USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/in-cluster-observability-agent"]
