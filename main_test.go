@@ -17,12 +17,19 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func TestMetricsEndpoint(t *testing.T) {
+	// Initialize some metrics
+	updateMetrics()
+	tcpConnections.WithLabelValues("outbound").Add(0)
+	tcpConnections.WithLabelValues("inbound").Add(0)
+	httpRequests.WithLabelValues("GET").Add(0)
+
 	req, err := http.NewRequest("GET", "/metrics", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -39,8 +46,21 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 
 	// Check if we have some expected metrics in the output
-	// Even if /proc/net/dev fails, the registry should still return something
-	if rr.Body.Len() == 0 {
-		t.Error("handler returned empty body")
+	body := rr.Body.String()
+	expectedMetrics := []string{
+		"node_network_receive_bytes_total",
+		"node_network_transmit_bytes_total",
+		"node_tcp_connections_total",
+		"node_http_requests_total",
 	}
+
+	for _, metric := range expectedMetrics {
+		if !contains(body, metric) {
+			t.Errorf("metric %s not found in output", metric)
+		}
+	}
+}
+
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
