@@ -23,10 +23,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"google.golang.org/grpc"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/grpc"
 )
 
 type traceServer struct {

@@ -23,7 +23,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/gke-labs/in-cluster-observability/cmd/opentelemetry-sink/pb"
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/cmd/opentelemetry-sink/pb"
 )
 
 type TypeCode uint32
