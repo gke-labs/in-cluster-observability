@@ -17,7 +17,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o in-cluster-observability-agent main.go
+RUN CGO_ENABLED=0 go build -o in-cluster-observability-agent .
 
 FROM gcr.io/distroless/static
 WORKDIR /
