@@ -22,6 +22,34 @@ on:
   merge_group:
 
 jobs:
+  ap-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-build
+        run: ./dev/ci/presubmits/ap-build
+
+  ap-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-lint
+        run: ./dev/ci/presubmits/ap-lint
+
   ap-test:
     runs-on: ubuntu-latest
     steps:
