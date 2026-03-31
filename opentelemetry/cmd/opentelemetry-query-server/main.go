@@ -22,7 +22,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 )
 
 type Registry struct {
@@ -117,6 +119,118 @@ func main() {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("error encoding response: %v", err)
 		}
+	})
+
+	// Kubernetes API discovery
+	http.HandleFunc("/apis", func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"kind": "APIGroupList",
+			"groups": []map[string]any{
+				{
+					"name": "custom.metrics.k8s.io",
+					"versions": []map[string]any{
+						{
+							"groupVersion": "custom.metrics.k8s.io/v1beta1",
+							"version":      "v1beta1",
+						},
+					},
+					"preferredVersion": map[string]any{
+						"groupVersion": "custom.metrics.k8s.io/v1beta1",
+						"version":      "v1beta1",
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	http.HandleFunc("/apis/custom.metrics.k8s.io", func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"kind":         "APIGroup",
+			"apiVersion":   "v1",
+			"name":         "custom.metrics.k8s.io",
+			"versions":     []map[string]any{{"groupVersion": "custom.metrics.k8s.io/v1beta1", "version": "v1beta1"}},
+			"preferredVersion": map[string]string{"groupVersion": "custom.metrics.k8s.io/v1beta1", "version": "v1beta1"},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	http.HandleFunc("/apis/custom.metrics.k8s.io/v1beta1/", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Custom metrics query v1beta1: %s", r.URL.Path)
+		if r.URL.Path == "/apis/custom.metrics.k8s.io/v1beta1" || r.URL.Path == "/apis/custom.metrics.k8s.io/v1beta1/" {
+			resp := map[string]any{
+				"kind":         "APIResourceList",
+				"apiVersion":   "v1",
+				"groupVersion": "custom.metrics.k8s.io/v1beta1",
+				"resources": []map[string]any{
+					{
+						"name":         "pods/test_metric",
+						"singularName": "",
+						"namespaced":   true,
+						"kind":         "MetricValueList",
+						"verbs":        []string{"get"},
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Implement the actual metric query handler
+		// Format: /apis/custom.metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod-name}/test_metric
+		parts := strings.Split(r.URL.Path, "/")
+		var namespace, podName string
+		if len(parts) >= 8 {
+			namespace = parts[5]
+			podName = parts[7]
+		}
+
+		items := []map[string]any{}
+		if podName == "*" {
+			// Return a few example pods to trigger scaling
+			for i := 0; i < 1; i++ {
+				name := "test-app"
+				if i > 0 {
+					name = fmt.Sprintf("test-app-%d", i)
+				}
+				items = append(items, map[string]any{
+					"describedObject": map[string]string{
+						"kind":       "Pod",
+						"namespace":  namespace,
+						"name":       name,
+						"apiVersion": "v1",
+					},
+					"metricName": "test_metric",
+					"timestamp":  time.Now().Format(time.RFC3339),
+					"value":      "100", // 100 > target 50
+				})
+			}
+		} else {
+			items = append(items, map[string]any{
+				"describedObject": map[string]string{
+					"kind":       "Pod",
+					"namespace":  namespace,
+					"name":       podName,
+					"apiVersion": "v1",
+				},
+				"metricName": "test_metric",
+				"timestamp":  time.Now().Format(time.RFC3339),
+				"value":      "100",
+			})
+		}
+
+		resp := map[string]any{
+			"kind":       "MetricValueList",
+			"apiVersion": "custom.metrics.k8s.io/v1beta1",
+			"metadata":   map[string]string{"selfLink": r.URL.Path},
+			"items":      items,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	log.Printf("query-server listening on %s", *addr)
