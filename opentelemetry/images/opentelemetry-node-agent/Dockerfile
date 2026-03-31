@@ -17,7 +17,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o opentelemetry-node-agent ./opentelemetry/cmd/opentelemetry-sink
+RUN CGO_ENABLED=0 go build -o opentelemetry-node-agent ./cmd/opentelemetry-sink
 
 FROM gcr.io/distroless/static
 WORKDIR /

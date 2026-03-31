@@ -15,7 +15,6 @@
 package main
 
 import (
-	"context"
 	"encoding/binary"
 	"io"
 	"os"
@@ -38,7 +37,7 @@ func TestWriter(t *testing.T) {
 	}
 	defer writer.Close()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	req := &coltracepb.ExportTraceServiceRequest{}
 	if err := writer.WriteObject(ctx, req); err != nil {
 		t.Fatalf("failed to write object: %v", err)

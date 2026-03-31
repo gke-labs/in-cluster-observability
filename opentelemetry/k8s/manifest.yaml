@@ -29,8 +29,7 @@ spec:
     spec:
       containers:
       - name: opentelemetry-node-agent
-        image: opentelemetry-node-agent:latest
-        imagePullPolicy: IfNotPresent
+        image: opentelemetry-node-agent
         args: ["--path", "/var/log/otel-data.bin"]
         ports:
         - containerPort: 4317
