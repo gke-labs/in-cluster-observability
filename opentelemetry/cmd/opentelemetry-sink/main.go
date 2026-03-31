@@ -15,18 +15,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type traceServer struct {
@@ -68,8 +74,22 @@ func (s *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 	return &collogspb.ExportLogsServiceResponse{}, nil
 }
 
+type QueryRequest struct {
+	Query string `json:"query"`
+}
+
+type QueryResponse struct {
+	Results []json.RawMessage `json:"results"`
+}
+
+type RegisterRequest struct {
+	Address string `json:"address"`
+}
+
 func main() {
-	addr := flag.String("addr", ":4317", "address to listen on")
+	addr := flag.String("addr", ":4317", "address to listen on for gRPC")
+	httpAddr := flag.String("http-addr", ":4318", "address to listen on for HTTP queries")
+	queryServerAddr := flag.String("query-server", "queryserver.observability-system:8080", "address of the query server")
 	path := flag.String("path", "otel-data.bin", "path to the output file")
 	flag.Parse()
 
@@ -89,11 +109,79 @@ func main() {
 	colmetricspb.RegisterMetricsServiceServer(s, &metricsServer{writer: writer})
 	collogspb.RegisterLogsServiceServer(s, &logsServer{writer: writer})
 
-	log.Printf("listening on %s, writing to %s", *addr, *path)
+	log.Printf("gRPC listening on %s, writing to %s", *addr, *path)
 
 	go func() {
 		if err := s.Serve(lis); err != nil {
 			log.Fatalf("failed to serve: %v", err)
+		}
+	}()
+
+	// Start HTTP server for queries
+	mux := http.NewServeMux()
+	mux.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var qreq QueryRequest
+		if err := json.NewDecoder(r.Body).Decode(&qreq); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		results, err := writer.Query(r.Context(), qreq.Query)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		var rawResults []json.RawMessage
+		for _, res := range results {
+			b, err := protojson.Marshal(res)
+			if err != nil {
+				log.Printf("error marshaling result: %v", err)
+				continue
+			}
+			rawResults = append(rawResults, json.RawMessage(b))
+		}
+
+		resp := QueryResponse{Results: rawResults}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	log.Printf("HTTP listening on %s", *httpAddr)
+	go func() {
+		if err := http.ListenAndServe(*httpAddr, mux); err != nil {
+			log.Fatalf("failed to serve http: %v", err)
+		}
+	}()
+
+	// Register with query server
+	go func() {
+		podIP := os.Getenv("POD_IP")
+		if podIP == "" {
+			log.Println("POD_IP not set, skipping registration")
+			return
+		}
+		// Extract port from httpAddr
+		_, port, _ := net.SplitHostPort(*httpAddr)
+		myAddr := net.JoinHostPort(podIP, port)
+
+		for {
+			req := RegisterRequest{Address: myAddr}
+			data, _ := json.Marshal(req)
+			resp, err := http.Post(fmt.Sprintf("http://%s/register", *queryServerAddr), "application/json", bytes.NewBuffer(data))
+			if err == nil && resp.StatusCode == http.StatusAccepted {
+				log.Printf("successfully registered with query server at %s", *queryServerAddr)
+				return
+			}
+			if err != nil {
+				log.Printf("failed to register with query server: %v", err)
+			} else {
+				log.Printf("query server returned status %d", resp.StatusCode)
+			}
+			time.Sleep(5 * time.Second)
 		}
 	}()
 
