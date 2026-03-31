@@ -147,10 +147,10 @@ func main() {
 
 	http.HandleFunc("/apis/custom.metrics.k8s.io", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
-			"kind":         "APIGroup",
-			"apiVersion":   "v1",
-			"name":         "custom.metrics.k8s.io",
-			"versions":     []map[string]any{{"groupVersion": "custom.metrics.k8s.io/v1beta1", "version": "v1beta1"}},
+			"kind":             "APIGroup",
+			"apiVersion":       "v1",
+			"name":             "custom.metrics.k8s.io",
+			"versions":         []map[string]any{{"groupVersion": "custom.metrics.k8s.io/v1beta1", "version": "v1beta1"}},
 			"preferredVersion": map[string]string{"groupVersion": "custom.metrics.k8s.io/v1beta1", "version": "v1beta1"},
 		}
 		w.Header().Set("Content-Type", "application/json")
