@@ -1,3 +1,8 @@
 in-cluster-observability
 *.log
 in-cluster-observability-agent
+.build/
+opentelemetry/opentelemetry-node-agent
+opentelemetry/opentelemetry-query-server
+opentelemetry/test-app
+opentelemetry/.build/
