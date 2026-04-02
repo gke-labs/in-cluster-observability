@@ -22,5 +22,5 @@ RUN CGO_ENABLED=0 go build -o opentelemetry-query-server ./cmd/opentelemetry-que
 FROM gcr.io/distroless/static
 WORKDIR /
 COPY --from=builder /app/opentelemetry-query-server .
-EXPOSE 8080
+EXPOSE 8443
 ENTRYPOINT ["/opentelemetry-query-server"]

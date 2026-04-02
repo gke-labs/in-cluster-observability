@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -89,7 +90,7 @@ type RegisterRequest struct {
 func main() {
 	addr := flag.String("addr", ":4317", "address to listen on for gRPC")
 	httpAddr := flag.String("http-addr", ":4318", "address to listen on for HTTP queries")
-	queryServerAddr := flag.String("query-server", "queryserver.observability-system:8080", "address of the query server")
+	queryServerAddr := flag.String("query-server", "queryserver.observability-system:443", "address of the query server")
 	path := flag.String("path", "otel-data.bin", "path to the output file")
 	flag.Parse()
 
@@ -168,10 +169,16 @@ func main() {
 		_, port, _ := net.SplitHostPort(*httpAddr)
 		myAddr := net.JoinHostPort(podIP, port)
 
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		}
+
 		for {
 			req := RegisterRequest{Address: myAddr}
 			data, _ := json.Marshal(req)
-			resp, err := http.Post(fmt.Sprintf("http://%s/register", *queryServerAddr), "application/json", bytes.NewBuffer(data))
+			resp, err := client.Post(fmt.Sprintf("https://%s/register", *queryServerAddr), "application/json", bytes.NewBuffer(data))
 			if err == nil && resp.StatusCode == http.StatusAccepted {
 				log.Printf("successfully registered with query server at %s", *queryServerAddr)
 				return
