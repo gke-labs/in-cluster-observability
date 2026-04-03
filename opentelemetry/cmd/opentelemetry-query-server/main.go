@@ -25,6 +25,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type Registry struct {
@@ -61,70 +64,26 @@ type QueryResponse struct {
 	Results []json.RawMessage `json:"results"`
 }
 
+type Server struct {
+	registry *Registry
+}
+
 func main() {
 	addr := flag.String("addr", ":8443", "address to listen on")
 	tlsCertFile := flag.String("tls-cert-file", "", "TLS certificate file")
 	tlsKeyFile := flag.String("tls-private-key-file", "", "TLS private key file")
 	flag.Parse()
 
-	registry := &Registry{
-		addresses: make(map[string]bool),
+	s := &Server{
+		registry: &Registry{
+			addresses: make(map[string]bool),
+		},
 	}
 
-	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req RegisterRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		registry.Register(req.Address)
-		w.WriteHeader(http.StatusAccepted)
-	})
-
-	http.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var qreq QueryRequest
-		if err := json.NewDecoder(r.Body).Decode(&qreq); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		addresses := registry.GetAddresses()
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		var allResults []json.RawMessage
-
-		for _, sinkAddr := range addresses {
-			wg.Add(1)
-			go func(addr string) {
-				defer wg.Done()
-				results, err := querySink(addr, qreq)
-				if err != nil {
-					log.Printf("error querying sink %s: %v", addr, err)
-					return
-				}
-				mu.Lock()
-				allResults = append(allResults, results...)
-				mu.Unlock()
-			}(sinkAddr)
-		}
-		wg.Wait()
-
-		resp := QueryResponse{Results: allResults}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			log.Printf("error encoding response: %v", err)
-		}
-	})
-
-	http.HandleFunc("/apis", apisHandler)
-	http.HandleFunc("/apis/", apisHandler)
+	http.HandleFunc("/register", s.registerHandler)
+	http.HandleFunc("/query", s.queryHandler)
+	http.HandleFunc("/apis", s.apisHandler)
+	http.HandleFunc("/apis/", s.apisHandler)
 
 	log.Printf("query-server listening on %s", *addr)
 	if *tlsCertFile != "" && *tlsKeyFile != "" {
@@ -135,6 +94,60 @@ func main() {
 		if err := http.ListenAndServe(*addr, nil); err != nil {
 			log.Fatalf("failed to listen: %v", err)
 		}
+	}
+}
+
+func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.registry.Register(req.Address)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var qreq QueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&qreq); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	log.Printf("Received query: %s", qreq.Query)
+
+	addresses := s.registry.GetAddresses()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var allResults []json.RawMessage
+
+	for _, sinkAddr := range addresses {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			results, err := querySink(addr, qreq)
+			if err != nil {
+				log.Printf("error querying sink %s: %v", addr, err)
+				return
+			}
+			mu.Lock()
+			allResults = append(allResults, results...)
+			mu.Unlock()
+		}(sinkAddr)
+	}
+	wg.Wait()
+
+	log.Printf("Query response for %q: %d results", qreq.Query, len(allResults))
+	resp := QueryResponse{Results: allResults}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("error encoding response: %v", err)
 	}
 }
 
@@ -163,7 +176,7 @@ func querySink(addr string, qreq QueryRequest) ([]json.RawMessage, error) {
 	return qresp.Results, nil
 }
 
-func apisHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if path == "/apis" || path == "/apis/" {
 		resp := map[string]any{
@@ -226,47 +239,119 @@ func apisHandler(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(path, "/apis/custom.metrics.k8s.io/v1beta1/") {
 		log.Printf("Custom metrics query v1beta1: %s", r.URL.Path)
 		// Implement the actual metric query handler
-		// Format: /apis/custom.metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod-name}/test_metric
-		parts := strings.Split(path, "/")
-		var namespace, podName string
-		if len(parts) >= 8 {
-			namespace = parts[5]
-			podName = parts[7]
+		// Format: /apis/custom.metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod-name}/{metric-name}
+		parts := strings.Split(strings.TrimPrefix(path, "/apis/custom.metrics.k8s.io/v1beta1/"), "/")
+		var namespace, podName, metricName string
+		if len(parts) >= 4 && parts[0] == "namespaces" && parts[2] == "pods" {
+			namespace = parts[1]
+			podName = parts[3]
+			metricName = parts[len(parts)-1]
+		} else {
+			http.Error(w, "invalid path format", http.StatusBadRequest)
+			return
 		}
 
-		items := []map[string]any{}
-		if podName == "*" {
-			// Return a few example pods to trigger scaling
-			for i := 0; i < 1; i++ {
-				name := "test-app"
-				if i > 0 {
-					name = fmt.Sprintf("test-app-%d", i)
-				}
-				items = append(items, map[string]any{
-					"describedObject": map[string]string{
-						"kind":       "Pod",
-						"namespace":  namespace,
-						"name":       name,
-						"apiVersion": "v1",
-					},
-					"metricName": "test_metric",
-					"timestamp":  time.Now().Format(time.RFC3339),
-					"value":      "100", // 100 > target 50
-				})
-			}
-		} else {
-			items = append(items, map[string]any{
-				"describedObject": map[string]string{
-					"kind":       "Pod",
-					"namespace":  namespace,
-					"name":       podName,
-					"apiVersion": "v1",
-				},
-				"metricName": "test_metric",
-				"timestamp":  time.Now().Format(time.RFC3339),
-				"value":      "100",
-			})
+		qreq := QueryRequest{
+			Query: fmt.Sprintf("metric=%s;namespace=%s;pod=%s", metricName, namespace, podName),
 		}
+
+		addresses := s.registry.GetAddresses()
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var allResults []json.RawMessage
+
+		for _, sinkAddr := range addresses {
+			wg.Add(1)
+			go func(addr string) {
+				defer wg.Done()
+				results, err := querySink(addr, qreq)
+				if err != nil {
+					log.Printf("error querying sink %s: %v", addr, err)
+					return
+				}
+				mu.Lock()
+				allResults = append(allResults, results...)
+				mu.Unlock()
+			}(sinkAddr)
+		}
+		wg.Wait()
+
+		items := []map[string]any{}
+		for _, raw := range allResults {
+			var mreq colmetricspb.ExportMetricsServiceRequest
+			if err := protojson.Unmarshal(raw, &mreq); err != nil {
+				log.Printf("failed to unmarshal OTLP metrics: %v", err)
+				continue
+			}
+
+			for _, rm := range mreq.ResourceMetrics {
+				// Re-verify namespace and pod name from resource attributes
+				var resPodName, resNamespace string
+				for _, attr := range rm.Resource.Attributes {
+					if attr.Key == "k8s.pod.name" {
+						resPodName = attr.Value.GetStringValue()
+					} else if attr.Key == "k8s.namespace.name" {
+						resNamespace = attr.Value.GetStringValue()
+					}
+				}
+
+				if namespace != "" && resNamespace != namespace {
+					continue
+				}
+				if podName != "" && podName != "*" && resPodName != podName {
+					continue
+				}
+
+				for _, sm := range rm.ScopeMetrics {
+					for _, m := range sm.Metrics {
+						if m.Name != metricName {
+							continue
+						}
+
+						// Extract value from the latest data point
+						value := ""
+						timestamp := time.Now()
+
+						if sum := m.GetSum(); sum != nil {
+							if len(sum.DataPoints) > 0 {
+								dp := sum.DataPoints[len(sum.DataPoints)-1]
+								value = fmt.Sprintf("%v", dp.GetAsInt())
+								if dp.GetAsDouble() != 0 {
+									value = fmt.Sprintf("%v", dp.GetAsDouble())
+								}
+								timestamp = time.Unix(0, int64(dp.TimeUnixNano))
+							}
+						} else if gauge := m.GetGauge(); gauge != nil {
+							if len(gauge.DataPoints) > 0 {
+								dp := gauge.DataPoints[len(gauge.DataPoints)-1]
+								value = fmt.Sprintf("%v", dp.GetAsInt())
+								if dp.GetAsDouble() != 0 {
+									value = fmt.Sprintf("%v", dp.GetAsDouble())
+								}
+								timestamp = time.Unix(0, int64(dp.TimeUnixNano))
+							}
+						}
+
+						if value != "" {
+							items = append(items, map[string]any{
+								"describedObject": map[string]string{
+									"kind":       "Pod",
+									"namespace":  resNamespace,
+									"name":       resPodName,
+									"apiVersion": "v1",
+								},
+								"metricName": metricName,
+								"timestamp":  timestamp.Format(time.RFC3339),
+								"value":      value,
+							})
+						}
+					}
+				}
+			}
+		}
+
+		// Log the query and response
+		log.Printf("APIS Query: %s -> %d items", qreq.Query, len(items))
 
 		resp := map[string]any{
 			"kind":       "MetricValueList",

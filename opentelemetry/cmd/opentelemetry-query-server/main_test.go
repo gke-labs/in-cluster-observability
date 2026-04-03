@@ -22,9 +22,14 @@ import (
 )
 
 func TestDiscoveryRedirect(t *testing.T) {
+	s := &Server{
+		registry: &Registry{
+			addresses: make(map[string]bool),
+		},
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/apis", apisHandler)
-	mux.HandleFunc("/apis/", apisHandler)
+	mux.HandleFunc("/apis", s.apisHandler)
+	mux.HandleFunc("/apis/", s.apisHandler)
 
 	tests := []struct {
 		path         string
