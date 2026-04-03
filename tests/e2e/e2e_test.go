@@ -23,8 +23,8 @@ import (
 )
 
 func TestObservabilityAgent(t *testing.T) {
-	if os.Getenv("E2E") == "" {
-		t.Skip("E2E env var not set, skipping")
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
 	}
 
 	h := NewHarness(t, "observability-agent-e2e")
