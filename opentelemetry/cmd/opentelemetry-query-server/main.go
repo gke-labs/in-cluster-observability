@@ -300,7 +300,7 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		qreq := QueryRequest{
-			Query: fmt.Sprintf("metric=%s;namespace=%s;pod=%s", metricName, namespace, podName),
+			Query: fmt.Sprintf("metric=%s;namespace=%s;pod=%s;latest_only=true", metricName, namespace, podName),
 		}
 
 		addresses := s.registry.GetAddresses()
@@ -324,7 +324,15 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		wg.Wait()
 
-		items := []map[string]any{}
+		type podKey struct {
+			namespace string
+			podName   string
+		}
+		latestItems := make(map[podKey]struct {
+			item      map[string]any
+			timestamp time.Time
+		})
+
 		for _, raw := range allResults {
 			var mreq colmetricspb.ExportMetricsServiceRequest
 			if err := protojson.Unmarshal(raw, &mreq); err != nil {
@@ -358,7 +366,7 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 
 						// Extract value from the latest data point
 						value := ""
-						timestamp := time.Now()
+						timestamp := time.Time{}
 
 						if sum := m.GetSum(); sum != nil {
 							if len(sum.DataPoints) > 0 {
@@ -381,21 +389,35 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 						}
 
 						if value != "" {
-							items = append(items, map[string]any{
-								"describedObject": map[string]string{
-									"kind":       "Pod",
-									"namespace":  resNamespace,
-									"name":       resPodName,
-									"apiVersion": "v1",
-								},
-								"metricName": metricName,
-								"timestamp":  timestamp.Format(time.RFC3339),
-								"value":      value,
-							})
+							key := podKey{namespace: resNamespace, podName: resPodName}
+							if existing, ok := latestItems[key]; !ok || timestamp.After(existing.timestamp) {
+								latestItems[key] = struct {
+									item      map[string]any
+									timestamp time.Time
+								}{
+									item: map[string]any{
+										"describedObject": map[string]string{
+											"kind":       "Pod",
+											"namespace":  resNamespace,
+											"name":       resPodName,
+											"apiVersion": "v1",
+										},
+										"metricName": metricName,
+										"timestamp":  timestamp.Format(time.RFC3339),
+										"value":      value,
+									},
+									timestamp: timestamp,
+								}
+							}
 						}
 					}
 				}
 			}
+		}
+
+		items := []map[string]any{}
+		for _, v := range latestItems {
+			items = append(items, v.item)
 		}
 
 		// Log the query and response
