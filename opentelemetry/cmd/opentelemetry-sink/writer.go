@@ -22,6 +22,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"sync"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -138,8 +139,20 @@ func (w *Writer) writeBytesWithTypeCode(ctx context.Context, typeCode TypeCode, 
 }
 
 func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, error) {
-	// For now, return all objects in the file since the query logic is not yet defined.
-	// But in a real implementation, we would filter based on the 'query' string.
+	filters := make(map[string]string)
+	if query != "" {
+		for _, part := range strings.Split(query, ";") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) == 2 {
+				filters[kv[0]] = kv[1]
+			}
+		}
+	}
+
+	targetMetric := filters["metric"]
+	targetNamespace := filters["namespace"]
+	targetPod := filters["pod"]
+
 	w.fileMutex.Lock()
 	defer w.fileMutex.Unlock()
 
@@ -200,7 +213,15 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 			continue
 		}
 
-		results = append(results, msg)
+		// Filter based on query
+		if mreq, ok := msg.(*colmetricspb.ExportMetricsServiceRequest); ok {
+			if matchesMetrics(mreq, targetMetric, targetNamespace, targetPod) {
+				results = append(results, mreq)
+			}
+		} else if targetMetric == "" && targetNamespace == "" && targetPod == "" {
+			// If no filters, return everything
+			results = append(results, msg)
+		}
 	}
 
 	// Seek back to the end of the file for subsequent writes.
@@ -209,6 +230,46 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 	}
 
 	return results, nil
+}
+
+func matchesMetrics(req *colmetricspb.ExportMetricsServiceRequest, targetMetric, targetNamespace, targetPod string) bool {
+	for _, rm := range req.ResourceMetrics {
+		matchesResource := true
+		if targetNamespace != "" || (targetPod != "" && targetPod != "*") {
+			podName := ""
+			namespace := ""
+			for _, attr := range rm.Resource.Attributes {
+				if attr.Key == "k8s.pod.name" {
+					podName = attr.Value.GetStringValue()
+				} else if attr.Key == "k8s.namespace.name" {
+					namespace = attr.Value.GetStringValue()
+				}
+			}
+			if targetNamespace != "" && namespace != targetNamespace {
+				matchesResource = false
+			}
+			if targetPod != "" && targetPod != "*" && podName != targetPod {
+				matchesResource = false
+			}
+		}
+
+		if !matchesResource {
+			continue
+		}
+
+		if targetMetric == "" {
+			return true
+		}
+
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if m.Name == targetMetric {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // In a real implementation, this would be more robust.
