@@ -42,6 +42,9 @@ func TestOpenTelemetryHPA(t *testing.T) {
 	h.DockerBuild("test-app:e2e", filepath.Join(otelRoot, "images/test-app/Dockerfile"), otelRoot)
 	h.KindLoad("test-app:e2e")
 
+	h.DockerBuild("test-client:e2e", filepath.Join(otelRoot, "images/test-client/Dockerfile"), otelRoot)
+	h.KindLoad("test-client:e2e")
+
 	// Install cert-manager
 	h.KubectlApplyFile("https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml")
 	h.WaitForDeployment("cert-manager", "cert-manager", 2*time.Minute)
@@ -69,9 +72,13 @@ func TestOpenTelemetryHPA(t *testing.T) {
 	h.RunCommand("kubectl", "set", "image", "deployment/test-app", "test-app=test-app:e2e", "-n", "default")
 	h.RunCommand("kubectl", "patch", "deployment", "test-app", "-n", "default", "--type=json", "-p", `[{"op": "replace", "path": "/spec/template/spec/containers/0/imagePullPolicy", "value": "Never"}]`)
 
-	h.WaitForDeployment("test-app", "default", 2*time.Minute)
+	h.RunCommand("kubectl", "set", "image", "deployment/test-client", "test-client=test-client:e2e", "-n", "default")
+	h.RunCommand("kubectl", "patch", "deployment", "test-client", "-n", "default", "--type=json", "-p", `[{"op": "replace", "path": "/spec/template/spec/containers/0/imagePullPolicy", "value": "Never"}]`)
 
-	// Verify HPA works. The query server is hardcoded to return 100 for test_metric,
+	h.WaitForDeployment("test-app", "default", 2*time.Minute)
+	h.WaitForDeployment("test-client", "default", 2*time.Minute)
+
+	// Verify HPA works. The test-client is sending 100 QPS,
 	// and target is 50. So it should scale to 2 replicas.
 	// HPA might take some time to react.
 	h.WaitForReplicas("test-app", "default", "2", 5*time.Minute)

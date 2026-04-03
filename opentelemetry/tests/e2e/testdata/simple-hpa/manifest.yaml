@@ -31,6 +31,8 @@ spec:
       containers:
       - name: test-app
         image: test-app
+        ports:
+        - containerPort: 8080
         env:
         - name: POD_NAME
           valueFrom:
@@ -40,6 +42,44 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+---
+# Service for Test Application
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-app
+  namespace: default
+spec:
+  selector:
+    app: test-app
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+# Test Client
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-client
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-client
+  template:
+    metadata:
+      labels:
+        app: test-client
+    spec:
+      containers:
+      - name: test-client
+        image: test-client
+        args:
+        - "-target"
+        - "http://test-app:8080"
+        - "-qps"
+        - "100"
 ---
 # HPA for Test Application
 apiVersion: autoscaling/v2
@@ -58,7 +98,7 @@ spec:
   - type: Pods
     pods:
       metric:
-        name: test_metric
+        name: qps
       target:
         type: AverageValue
         averageValue: "50"

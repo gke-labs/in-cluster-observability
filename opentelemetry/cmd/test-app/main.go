@@ -17,8 +17,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -31,6 +34,7 @@ import (
 
 func main() {
 	endpoint := flag.String("endpoint", "opentelemetry-node-agent.observability-system:4317", "OTLP endpoint")
+	addr := flag.String("addr", ":8080", "HTTP server address")
 	flag.Parse()
 
 	podName := os.Getenv("POD_NAME")
@@ -71,18 +75,38 @@ func main() {
 	otel.SetMeterProvider(meterProvider)
 
 	meter := otel.Meter("test-app")
-	counter, err := meter.Int64Counter("test_metric",
-		metric.WithDescription("A simple test metric"),
+
+	var requestCount int64
+	var qps int64
+
+	_, err = meter.Int64ObservableGauge("qps",
+		metric.WithDescription("Current QPS of the application"),
+		metric.WithInt64Callback(func(_ context.Context, obs metric.Int64Observer) error {
+			obs.Observe(atomic.LoadInt64(&qps))
+			return nil
+		}),
 	)
 	if err != nil {
-		log.Fatalf("failed to create counter: %v", err)
+		log.Fatalf("failed to create gauge: %v", err)
 	}
 
-	log.Printf("test-app starting, sending metrics to %s", *endpoint)
+	go func() {
+		lastCount := int64(0)
+		ticker := time.NewTicker(1 * time.Second)
+		for range ticker.C {
+			currentCount := atomic.LoadInt64(&requestCount)
+			atomic.StoreInt64(&qps, currentCount-lastCount)
+			lastCount = currentCount
+		}
+	}()
 
-	for {
-		counter.Add(ctx, 10)
-		log.Printf("incremented test_metric by 10")
-		time.Sleep(1 * time.Second)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requestCount, 1)
+		fmt.Fprintf(w, "OK")
+	})
+
+	log.Printf("test-app starting, sending metrics to %s, listening on %s", *endpoint, *addr)
+	if err := http.ListenAndServe(*addr, nil); err != nil {
+		log.Fatalf("failed to listen: %v", err)
 	}
 }
