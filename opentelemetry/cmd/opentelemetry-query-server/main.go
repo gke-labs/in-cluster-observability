@@ -270,6 +270,13 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 					"kind":         "MetricValueList",
 					"verbs":        []string{"get"},
 				},
+				{
+					"name":         "pods/qps",
+					"singularName": "",
+					"namespaced":   true,
+					"kind":         "MetricValueList",
+					"verbs":        []string{"get"},
+				},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
