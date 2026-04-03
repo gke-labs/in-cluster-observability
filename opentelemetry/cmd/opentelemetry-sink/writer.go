@@ -28,6 +28,7 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/cmd/opentelemetry-sink/pb"
@@ -152,6 +153,7 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 	targetMetric := filters["metric"]
 	targetNamespace := filters["namespace"]
 	targetPod := filters["pod"]
+	latestOnly := filters["latest_only"] == "true"
 
 	w.fileMutex.Lock()
 	defer w.fileMutex.Unlock()
@@ -170,6 +172,12 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 	w.typeCodesMutex.Unlock()
 
 	var results []proto.Message
+	type podKey struct {
+		namespace string
+		podName   string
+	}
+	latestMetrics := make(map[podKey]*colmetricspb.ExportMetricsServiceRequest)
+
 	for {
 		header := make([]byte, 16)
 		if _, err := io.ReadFull(w.f, header); err != nil {
@@ -215,12 +223,43 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 
 		// Filter based on query
 		if mreq, ok := msg.(*colmetricspb.ExportMetricsServiceRequest); ok {
-			if matchesMetrics(mreq, targetMetric, targetNamespace, targetPod) {
-				results = append(results, mreq)
+			if latestOnly {
+				for _, rm := range mreq.ResourceMetrics {
+					if matchesResource(rm, targetNamespace, targetPod) {
+						if targetMetric == "" || matchesMetricName(rm, targetMetric) {
+							var resPodName, resNamespace string
+							for _, attr := range rm.Resource.Attributes {
+								if attr.Key == "k8s.pod.name" {
+									resPodName = attr.Value.GetStringValue()
+								} else if attr.Key == "k8s.namespace.name" {
+									resNamespace = attr.Value.GetStringValue()
+								}
+							}
+							if resPodName != "" {
+								key := podKey{namespace: resNamespace, podName: resPodName}
+								latestMetrics[key] = mreq
+							}
+						}
+					}
+				}
+			} else {
+				if matchesMetrics(mreq, targetMetric, targetNamespace, targetPod) {
+					results = append(results, mreq)
+				}
 			}
 		} else if targetMetric == "" && targetNamespace == "" && targetPod == "" {
 			// If no filters, return everything
 			results = append(results, msg)
+		}
+	}
+
+	if latestOnly {
+		seen := make(map[*colmetricspb.ExportMetricsServiceRequest]bool)
+		for _, mreq := range latestMetrics {
+			if !seen[mreq] {
+				results = append(results, mreq)
+				seen[mreq] = true
+			}
 		}
 	}
 
@@ -234,26 +273,7 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 
 func matchesMetrics(req *colmetricspb.ExportMetricsServiceRequest, targetMetric, targetNamespace, targetPod string) bool {
 	for _, rm := range req.ResourceMetrics {
-		matchesResource := true
-		if targetNamespace != "" || (targetPod != "" && targetPod != "*") {
-			podName := ""
-			namespace := ""
-			for _, attr := range rm.Resource.Attributes {
-				if attr.Key == "k8s.pod.name" {
-					podName = attr.Value.GetStringValue()
-				} else if attr.Key == "k8s.namespace.name" {
-					namespace = attr.Value.GetStringValue()
-				}
-			}
-			if targetNamespace != "" && namespace != targetNamespace {
-				matchesResource = false
-			}
-			if targetPod != "" && targetPod != "*" && podName != targetPod {
-				matchesResource = false
-			}
-		}
-
-		if !matchesResource {
+		if !matchesResource(rm, targetNamespace, targetPod) {
 			continue
 		}
 
@@ -261,11 +281,40 @@ func matchesMetrics(req *colmetricspb.ExportMetricsServiceRequest, targetMetric,
 			return true
 		}
 
-		for _, sm := range rm.ScopeMetrics {
-			for _, m := range sm.Metrics {
-				if m.Name == targetMetric {
-					return true
-				}
+		if matchesMetricName(rm, targetMetric) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesResource(rm *metricspb.ResourceMetrics, targetNamespace, targetPod string) bool {
+	if targetNamespace == "" && (targetPod == "" || targetPod == "*") {
+		return true
+	}
+	podName := ""
+	namespace := ""
+	for _, attr := range rm.Resource.Attributes {
+		if attr.Key == "k8s.pod.name" {
+			podName = attr.Value.GetStringValue()
+		} else if attr.Key == "k8s.namespace.name" {
+			namespace = attr.Value.GetStringValue()
+		}
+	}
+	if targetNamespace != "" && namespace != targetNamespace {
+		return false
+	}
+	if targetPod != "" && targetPod != "*" && podName != targetPod {
+		return false
+	}
+	return true
+}
+
+func matchesMetricName(rm *metricspb.ResourceMetrics, targetMetric string) bool {
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == targetMetric {
+				return true
 			}
 		}
 	}
