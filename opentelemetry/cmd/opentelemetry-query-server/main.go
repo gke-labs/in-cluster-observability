@@ -62,7 +62,9 @@ type QueryResponse struct {
 }
 
 func main() {
-	addr := flag.String("addr", ":8080", "address to listen on")
+	addr := flag.String("addr", ":8443", "address to listen on")
+	tlsCertFile := flag.String("tls-cert-file", "", "TLS certificate file")
+	tlsKeyFile := flag.String("tls-private-key-file", "", "TLS private key file")
 	flag.Parse()
 
 	registry := &Registry{
@@ -234,8 +236,14 @@ func main() {
 	})
 
 	log.Printf("query-server listening on %s", *addr)
-	if err := http.ListenAndServe(*addr, nil); err != nil {
-		log.Fatalf("failed to listen: %v", err)
+	if *tlsCertFile != "" && *tlsKeyFile != "" {
+		if err := http.ListenAndServeTLS(*addr, *tlsCertFile, *tlsKeyFile, nil); err != nil {
+			log.Fatalf("failed to listen (TLS): %v", err)
+		}
+	} else {
+		if err := http.ListenAndServe(*addr, nil); err != nil {
+			log.Fatalf("failed to listen: %v", err)
+		}
 	}
 }
 
