@@ -123,8 +123,49 @@ func main() {
 		}
 	})
 
-	// Kubernetes API discovery
-	http.HandleFunc("/apis", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/apis", apisHandler)
+	http.HandleFunc("/apis/", apisHandler)
+
+	log.Printf("query-server listening on %s", *addr)
+	if *tlsCertFile != "" && *tlsKeyFile != "" {
+		if err := http.ListenAndServeTLS(*addr, *tlsCertFile, *tlsKeyFile, nil); err != nil {
+			log.Fatalf("failed to listen (TLS): %v", err)
+		}
+	} else {
+		if err := http.ListenAndServe(*addr, nil); err != nil {
+			log.Fatalf("failed to listen: %v", err)
+		}
+	}
+}
+
+func querySink(addr string, qreq QueryRequest) ([]json.RawMessage, error) {
+	data, err := json.Marshal(qreq)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("http://%s/query", addr)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sink returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var qresp QueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&qresp); err != nil {
+		return nil, err
+	}
+	return qresp.Results, nil
+}
+
+func apisHandler(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	if path == "/apis" || path == "/apis/" {
 		resp := map[string]any{
 			"kind": "APIGroupList",
 			"groups": []map[string]any{
@@ -145,9 +186,10 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-	})
+		return
+	}
 
-	http.HandleFunc("/apis/custom.metrics.k8s.io", func(w http.ResponseWriter, r *http.Request) {
+	if path == "/apis/custom.metrics.k8s.io" || path == "/apis/custom.metrics.k8s.io/" {
 		resp := map[string]any{
 			"kind":             "APIGroup",
 			"apiVersion":       "v1",
@@ -157,33 +199,35 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-	})
+		return
+	}
 
-	http.HandleFunc("/apis/custom.metrics.k8s.io/v1beta1/", func(w http.ResponseWriter, r *http.Request) {
+	if path == "/apis/custom.metrics.k8s.io/v1beta1" || path == "/apis/custom.metrics.k8s.io/v1beta1/" {
 		log.Printf("Custom metrics query v1beta1: %s", r.URL.Path)
-		if r.URL.Path == "/apis/custom.metrics.k8s.io/v1beta1" || r.URL.Path == "/apis/custom.metrics.k8s.io/v1beta1/" {
-			resp := map[string]any{
-				"kind":         "APIResourceList",
-				"apiVersion":   "v1",
-				"groupVersion": "custom.metrics.k8s.io/v1beta1",
-				"resources": []map[string]any{
-					{
-						"name":         "pods/test_metric",
-						"singularName": "",
-						"namespaced":   true,
-						"kind":         "MetricValueList",
-						"verbs":        []string{"get"},
-					},
+		resp := map[string]any{
+			"kind":         "APIResourceList",
+			"apiVersion":   "v1",
+			"groupVersion": "custom.metrics.k8s.io/v1beta1",
+			"resources": []map[string]any{
+				{
+					"name":         "pods/test_metric",
+					"singularName": "",
+					"namespaced":   true,
+					"kind":         "MetricValueList",
+					"verbs":        []string{"get"},
 				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			return
+			},
 		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
 
+	if strings.HasPrefix(path, "/apis/custom.metrics.k8s.io/v1beta1/") {
+		log.Printf("Custom metrics query v1beta1: %s", r.URL.Path)
 		// Implement the actual metric query handler
 		// Format: /apis/custom.metrics.k8s.io/v1beta1/namespaces/{namespace}/pods/{pod-name}/test_metric
-		parts := strings.Split(r.URL.Path, "/")
+		parts := strings.Split(path, "/")
 		var namespace, podName string
 		if len(parts) >= 8 {
 			namespace = parts[5]
@@ -227,47 +271,14 @@ func main() {
 		resp := map[string]any{
 			"kind":       "MetricValueList",
 			"apiVersion": "custom.metrics.k8s.io/v1beta1",
-			"metadata":   map[string]string{"selfLink": r.URL.Path},
+			"metadata":   map[string]string{"selfLink": path},
 			"items":      items,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-	})
-
-	log.Printf("query-server listening on %s", *addr)
-	if *tlsCertFile != "" && *tlsKeyFile != "" {
-		if err := http.ListenAndServeTLS(*addr, *tlsCertFile, *tlsKeyFile, nil); err != nil {
-			log.Fatalf("failed to listen (TLS): %v", err)
-		}
-	} else {
-		if err := http.ListenAndServe(*addr, nil); err != nil {
-			log.Fatalf("failed to listen: %v", err)
-		}
-	}
-}
-
-func querySink(addr string, qreq QueryRequest) ([]json.RawMessage, error) {
-	data, err := json.Marshal(qreq)
-	if err != nil {
-		return nil, err
+		return
 	}
 
-	url := fmt.Sprintf("http://%s/query", addr)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sink returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var qresp QueryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&qresp); err != nil {
-		return nil, err
-	}
-	return qresp.Results, nil
+	http.NotFound(w, r)
 }
