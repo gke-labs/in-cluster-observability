@@ -15,31 +15,48 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 )
 
 type Registry struct {
 	mu        sync.Mutex
-	addresses map[string]bool
+	addresses map[string]int
 }
 
 func (r *Registry) Register(address string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.addresses[address] = true
-	log.Printf("registered sink: %s", address)
+	r.addresses[address]++
+	log.Printf("registered sink: %s (active registrations: %d)", address, r.addresses[address])
+}
+
+func (r *Registry) Unregister(address string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addresses[address]--
+	if r.addresses[address] <= 0 {
+		delete(r.addresses, address)
+		log.Printf("unregistered sink: %s", address)
+	} else {
+		log.Printf("decreased registration count for sink: %s (active: %d)", address, r.addresses[address])
+	}
 }
 
 func (r *Registry) GetAddresses() []string {
@@ -52,10 +69,6 @@ func (r *Registry) GetAddresses() []string {
 	return addrs
 }
 
-type RegisterRequest struct {
-	Address string `json:"address"`
-}
-
 type QueryRequest struct {
 	Query string `json:"query"`
 }
@@ -66,24 +79,71 @@ type QueryResponse struct {
 
 type Server struct {
 	registry *Registry
+	pb.UnimplementedRegistrationServiceServer
+}
+
+func (s *Server) Register(stream pb.RegistrationService_RegisterServer) error {
+	var address string
+	defer func() {
+		if address != "" {
+			s.registry.Unregister(address)
+		}
+	}()
+
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if address == "" {
+			address = req.Address
+			s.registry.Register(address)
+		} else if address != req.Address {
+			s.registry.Unregister(address)
+			address = req.Address
+			s.registry.Register(address)
+		}
+
+		if err := stream.Send(&pb.RegisterResponse{}); err != nil {
+			return err
+		}
+	}
 }
 
 func main() {
 	addr := flag.String("addr", ":8443", "address to listen on")
+	grpcAddr := flag.String("grpc-addr", ":9443", "gRPC address to listen on for registrations")
 	tlsCertFile := flag.String("tls-cert-file", "", "TLS certificate file")
 	tlsKeyFile := flag.String("tls-private-key-file", "", "TLS private key file")
 	flag.Parse()
 
 	s := &Server{
 		registry: &Registry{
-			addresses: make(map[string]bool),
+			addresses: make(map[string]int),
 		},
 	}
 
-	http.HandleFunc("/register", s.registerHandler)
 	http.HandleFunc("/query", s.queryHandler)
 	http.HandleFunc("/apis", s.apisHandler)
 	http.HandleFunc("/apis/", s.apisHandler)
+
+	// Start gRPC server for registrations
+	lis, err := net.Listen("tcp", *grpcAddr)
+	if err != nil {
+		log.Fatalf("failed to listen on gRPC: %v", err)
+	}
+	gs := grpc.NewServer()
+	pb.RegisterRegistrationServiceServer(gs, s)
+	log.Printf("gRPC server listening on %s", *grpcAddr)
+	go func() {
+		if err := gs.Serve(lis); err != nil {
+			log.Fatalf("failed to serve gRPC: %v", err)
+		}
+	}()
 
 	log.Printf("query-server listening on %s", *addr)
 	if *tlsCertFile != "" && *tlsKeyFile != "" {
@@ -95,20 +155,6 @@ func main() {
 			log.Fatalf("failed to listen: %v", err)
 		}
 	}
-}
-
-func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	s.registry.Register(req.Address)
-	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +178,7 @@ func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(addr string) {
 			defer wg.Done()
-			results, err := querySink(addr, qreq)
+			results, err := querySink(r.Context(), addr, qreq)
 			if err != nil {
 				log.Printf("error querying sink %s: %v", addr, err)
 				return
@@ -151,29 +197,24 @@ func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func querySink(addr string, qreq QueryRequest) ([]json.RawMessage, error) {
-	data, err := json.Marshal(qreq)
+func querySink(ctx context.Context, addr string, qreq QueryRequest) ([]json.RawMessage, error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := pb.NewQueryServiceClient(conn)
+	resp, err := client.Query(ctx, &pb.QueryRequest{Query: qreq.Query})
 	if err != nil {
 		return nil, err
 	}
 
-	url := fmt.Sprintf("http://%s/query", addr)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
-	if err != nil {
-		return nil, err
+	var results []json.RawMessage
+	for _, res := range resp.Results {
+		results = append(results, json.RawMessage(res))
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sink returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var qresp QueryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&qresp); err != nil {
-		return nil, err
-	}
-	return qresp.Results, nil
+	return results, nil
 }
 
 func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
@@ -264,7 +305,7 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 			wg.Add(1)
 			go func(addr string) {
 				defer wg.Done()
-				results, err := querySink(addr, qreq)
+				results, err := querySink(r.Context(), addr, qreq)
 				if err != nil {
 					log.Printf("error querying sink %s: %v", addr, err)
 					return

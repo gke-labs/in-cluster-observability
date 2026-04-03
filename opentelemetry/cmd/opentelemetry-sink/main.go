@@ -15,12 +15,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -33,7 +30,10 @@ import (
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 )
 
 type traceServer struct {
@@ -75,6 +75,30 @@ func (s *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 	return &collogspb.ExportLogsServiceResponse{}, nil
 }
 
+type queryServer struct {
+	writer *Writer
+	pb.UnimplementedQueryServiceServer
+}
+
+func (s *queryServer) Query(ctx context.Context, req *pb.QueryRequest) (*pb.QueryResponse, error) {
+	results, err := s.writer.Query(ctx, req.Query)
+	if err != nil {
+		return nil, err
+	}
+
+	var rawResults [][]byte
+	for _, res := range results {
+		b, err := protojson.Marshal(res)
+		if err != nil {
+			log.Printf("error marshaling result: %v", err)
+			continue
+		}
+		rawResults = append(rawResults, b)
+	}
+
+	return &pb.QueryResponse{Results: rawResults}, nil
+}
+
 type QueryRequest struct {
 	Query string `json:"query"`
 }
@@ -83,14 +107,10 @@ type QueryResponse struct {
 	Results []json.RawMessage `json:"results"`
 }
 
-type RegisterRequest struct {
-	Address string `json:"address"`
-}
-
 func main() {
 	addr := flag.String("addr", ":4317", "address to listen on for gRPC")
 	httpAddr := flag.String("http-addr", ":4318", "address to listen on for HTTP queries")
-	queryServerAddr := flag.String("query-server", "queryserver.observability-system:443", "address of the query server")
+	queryServerAddr := flag.String("query-server", "queryserver.observability-system:9443", "address of the query server")
 	path := flag.String("path", "otel-data.bin", "path to the output file")
 	flag.Parse()
 
@@ -109,6 +129,7 @@ func main() {
 	coltracepb.RegisterTraceServiceServer(s, &traceServer{writer: writer})
 	colmetricspb.RegisterMetricsServiceServer(s, &metricsServer{writer: writer})
 	collogspb.RegisterLogsServiceServer(s, &logsServer{writer: writer})
+	pb.RegisterQueryServiceServer(s, &queryServer{writer: writer})
 
 	log.Printf("gRPC listening on %s, writing to %s", *addr, *path)
 
@@ -165,29 +186,47 @@ func main() {
 			log.Println("POD_IP not set, skipping registration")
 			return
 		}
-		// Extract port from httpAddr
-		_, port, _ := net.SplitHostPort(*httpAddr)
+		// Use gRPC port for querying the sink
+		_, port, _ := net.SplitHostPort(*addr)
 		myAddr := net.JoinHostPort(podIP, port)
 
-		client := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-
 		for {
-			req := RegisterRequest{Address: myAddr}
-			data, _ := json.Marshal(req)
-			resp, err := client.Post(fmt.Sprintf("https://%s/register", *queryServerAddr), "application/json", bytes.NewBuffer(data))
-			if err == nil && resp.StatusCode == http.StatusAccepted {
-				log.Printf("successfully registered with query server at %s", *queryServerAddr)
-				return
-			}
-			if err != nil {
-				log.Printf("failed to register with query server: %v", err)
-			} else {
-				log.Printf("query server returned status %d", resp.StatusCode)
-			}
+			func() {
+				conn, err := grpc.NewClient(*queryServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+				if err != nil {
+					log.Printf("failed to connect to query server %s: %v", *queryServerAddr, err)
+					return
+				}
+				defer conn.Close()
+
+				client := pb.NewRegistrationServiceClient(conn)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				stream, err := client.Register(ctx)
+				if err != nil {
+					log.Printf("failed to open registration stream to %s: %v", *queryServerAddr, err)
+					return
+				}
+
+				log.Printf("successfully opened registration stream to query server at %s", *queryServerAddr)
+
+				for {
+					req := &pb.RegisterRequest{Address: myAddr}
+					if err := stream.Send(req); err != nil {
+						log.Printf("failed to send registration heartbeat: %v", err)
+						return
+					}
+
+					// Wait for acknowledgment (or heartbeat response)
+					_, err := stream.Recv()
+					if err != nil {
+						log.Printf("registration stream closed: %v", err)
+						return
+					}
+					time.Sleep(5 * time.Second)
+				}
+			}()
 			time.Sleep(5 * time.Second)
 		}
 	}()
