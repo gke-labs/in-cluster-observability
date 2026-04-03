@@ -42,6 +42,12 @@ func TestOpenTelemetryHPA(t *testing.T) {
 	h.DockerBuild("test-app:e2e", filepath.Join(otelRoot, "images/test-app/Dockerfile"), otelRoot)
 	h.KindLoad("test-app:e2e")
 
+	// Install cert-manager
+	h.KubectlApplyFile("https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml")
+	h.WaitForDeployment("cert-manager", "cert-manager", 2*time.Minute)
+	h.WaitForDeployment("cert-manager-cainjector", "cert-manager", 2*time.Minute)
+	h.WaitForDeployment("cert-manager-webhook", "cert-manager", 2*time.Minute)
+
 	// Deploy core components
 	h.KubectlApplyFile(filepath.Join(otelRoot, "k8s/manifest.yaml"))
 
