@@ -1,0 +1,51 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package opentelemetry;
+
+option go_package = "github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb";
+
+// RegistrationService is used by sinks to register with the query server.
+service RegistrationService {
+  // Register allows a sink to register itself with the query server.
+  // The sink should keep this stream open to maintain the registration.
+  // The sink should periodically send RegisterRequest messages (heartbeats).
+  rpc Register(stream RegisterRequest) returns (stream RegisterResponse);
+}
+
+message RegisterRequest {
+  // Address of the sink (host:port).
+  string address = 1;
+}
+
+message RegisterResponse {
+  // For acknowledgment or future commands.
+}
+
+// QueryService is hosted on the sink and used by the query server to query it.
+service QueryService {
+  // Query executes a query on the sink.
+  rpc Query(QueryRequest) returns (QueryResponse);
+}
+
+message QueryRequest {
+  string query = 1;
+}
+
+message QueryResponse {
+  // Results are OTLP messages (e.g., ExportMetricsServiceRequest) marshaled to JSON.
+  repeated bytes results = 1;
+}

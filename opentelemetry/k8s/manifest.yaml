@@ -122,6 +122,8 @@ spec:
         ports:
         - containerPort: 8443
           name: https
+        - containerPort: 9443
+          name: grpc
         volumeMounts:
         - name: certs
           mountPath: /certs
@@ -143,6 +145,9 @@ spec:
   - port: 443
     targetPort: 8443
     name: https
+  - port: 9443
+    targetPort: 9443
+    name: grpc
 ---
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService

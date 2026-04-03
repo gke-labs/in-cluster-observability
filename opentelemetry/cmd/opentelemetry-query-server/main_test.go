@@ -24,7 +24,7 @@ import (
 func TestDiscoveryRedirect(t *testing.T) {
 	s := &Server{
 		registry: &Registry{
-			addresses: make(map[string]bool),
+			addresses: make(map[string]int),
 		},
 	}
 	mux := http.NewServeMux()
