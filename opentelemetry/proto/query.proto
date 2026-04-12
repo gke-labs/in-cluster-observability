@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package opentelemetry;
+
+option go_package = "github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb";
+
+service FrontendQueryService {
+  rpc Query(FrontendQueryRequest) returns (FrontendQueryResponse);
+}
+
+enum Table {
+  TABLE_UNSPECIFIED = 0;
+  LOGS = 1;
+  TRACES = 2;
+  METRICS = 3;
+}
+
+message FrontendQueryRequest {
+  Table table = 1;
+  repeated string filters = 2;
+}
+
+message FrontendQueryResponse {
+  repeated bytes results = 1;
+}
