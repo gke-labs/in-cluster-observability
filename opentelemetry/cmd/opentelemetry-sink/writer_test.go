@@ -24,14 +24,13 @@ import (
 )
 
 func TestWriter(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "otel-test-*.bin")
+	tmpDir, err := os.MkdirTemp("", "otel-test-dir-*")
 	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
+		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
+	defer os.RemoveAll(tmpDir)
 
-	writer, err := NewWriter(tmpFile.Name())
+	writer, err := NewWriter(tmpDir)
 	if err != nil {
 		t.Fatalf("failed to create writer: %v", err)
 	}
@@ -44,7 +43,7 @@ func TestWriter(t *testing.T) {
 	}
 
 	// Read back and verify
-	f, err := os.Open(tmpFile.Name())
+	f, err := os.Open(writer.currentShard)
 	if err != nil {
 		t.Fatalf("failed to open output file: %v", err)
 	}
@@ -82,5 +81,4 @@ func TestWriter(t *testing.T) {
 	if typeCode != 32 {
 		t.Errorf("expected typeCode 32, got %d", typeCode)
 	}
-
 }

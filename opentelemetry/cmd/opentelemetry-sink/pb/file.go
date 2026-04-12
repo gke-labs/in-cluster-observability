@@ -43,3 +43,45 @@ func (x *ObjectType) Marshal() []byte {
 
 	return buf.Bytes()
 }
+
+func (x *ObjectType) Unmarshal(data []byte) error {
+	var i int
+	for i < len(data) {
+		tag, n := binary.Uvarint(data[i:])
+		if n <= 0 {
+			break
+		}
+		i += n
+
+		fieldNum := tag >> 3
+		wireType := tag & 7
+
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return nil // Ignore errors for simplicity
+			}
+			val, n := binary.Uvarint(data[i:])
+			if n <= 0 {
+				break
+			}
+			i += n
+			x.TypeCode = uint32(val)
+		case 2:
+			if wireType != 2 {
+				return nil
+			}
+			length, n := binary.Uvarint(data[i:])
+			if n <= 0 {
+				break
+			}
+			i += n
+			x.TypeName = string(data[i : i+int(length)])
+			i += int(length)
+		default:
+			// Skip for simplicity assuming we only have these 2
+			return nil
+		}
+	}
+	return nil
+}

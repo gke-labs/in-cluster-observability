@@ -61,7 +61,7 @@ spec:
       containers:
       - name: opentelemetry-node-agent
         image: opentelemetry-node-agent
-        args: ["--path", "/var/log/otel-data.bin"]
+        args: ["--path", "/var/log/otel-data"]
         env:
         - name: POD_IP
           valueFrom:
