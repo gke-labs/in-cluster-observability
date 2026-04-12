@@ -111,7 +111,7 @@ func main() {
 	addr := flag.String("addr", ":4317", "address to listen on for gRPC")
 	httpAddr := flag.String("http-addr", ":4318", "address to listen on for HTTP queries")
 	queryServerAddr := flag.String("query-server", "queryserver.observability-system:9443", "address of the query server")
-	path := flag.String("path", "otel-data.bin", "path to the output file")
+	path := flag.String("path", "otel-data", "path to the output directory")
 	flag.Parse()
 
 	writer, err := NewWriter(*path)

@@ -22,8 +22,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -42,24 +45,73 @@ const (
 )
 
 type Writer struct {
-	fileMutex sync.Mutex
-	f         *os.File
+	dir          string
+	fileMutex    sync.Mutex
+	f            *os.File
+	currentShard string
 
 	typeCodesMutex sync.Mutex
 	nextTypeCode   TypeCode
 	typeCodes      map[string]TypeCode
+
+	stopChan chan struct{}
 }
 
-func NewWriter(path string) (*Writer, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0644)
-	if err != nil {
+func NewWriter(dir string) (*Writer, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
+
 	w := &Writer{
-		f:            f,
+		dir:          dir,
 		nextTypeCode: 32,
 		typeCodes:    make(map[string]TypeCode),
+		stopChan:     make(chan struct{}),
 	}
+
+	if err := w.rotateShard(); err != nil {
+		return nil, err
+	}
+
+	go w.shardingLoop()
+
+	return w, nil
+}
+
+func (w *Writer) shardingLoop() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := w.rotateShard(); err != nil {
+				log.Printf("failed to rotate shard: %v", err)
+			}
+		case <-w.stopChan:
+			return
+		}
+	}
+}
+
+func (w *Writer) rotateShard() error {
+	w.fileMutex.Lock()
+	defer w.fileMutex.Unlock()
+
+	if w.f != nil {
+		w.f.Close()
+	}
+
+	shardName := filepath.Join(w.dir, fmt.Sprintf("shard-%020d.bin", time.Now().UnixNano()))
+	f, err := os.OpenFile(shardName, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	w.f = f
+	w.currentShard = shardName
+
+	// Re-write all known type codes to the new shard so it's self-contained.
+	w.typeCodesMutex.Lock()
+	defer w.typeCodesMutex.Unlock()
 
 	// Record the mapping for ObjectType itself.
 	objType := &pb.ObjectType{
@@ -67,18 +119,31 @@ func NewWriter(path string) (*Writer, error) {
 		TypeName: "otlptracefile.ObjectType",
 	}
 	data := objType.Marshal()
-	if err := w.writeBytesWithTypeCode(context.Background(), TypeCode_ObjectType, data); err != nil {
-		f.Close()
-		return nil, err
+	if err := w.writeBytesWithTypeCodeLocked(TypeCode_ObjectType, data); err != nil {
+		return err
 	}
 
-	return w, nil
+	for typeName, code := range w.typeCodes {
+		obj := &pb.ObjectType{
+			TypeCode: uint32(code),
+			TypeName: typeName,
+		}
+		if err := w.writeBytesWithTypeCodeLocked(TypeCode_ObjectType, obj.Marshal()); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (w *Writer) Close() error {
+	close(w.stopChan)
 	w.fileMutex.Lock()
 	defer w.fileMutex.Unlock()
-	return w.f.Close()
+	if w.f != nil {
+		return w.f.Close()
+	}
+	return nil
 }
 
 func (w *Writer) WriteObject(ctx context.Context, obj proto.Message) error {
@@ -121,14 +186,17 @@ func (w *Writer) codeForType(ctx context.Context, typeName string) (TypeCode, er
 }
 
 func (w *Writer) writeBytesWithTypeCode(ctx context.Context, typeCode TypeCode, data []byte) error {
+	w.fileMutex.Lock()
+	defer w.fileMutex.Unlock()
+	return w.writeBytesWithTypeCodeLocked(typeCode, data)
+}
+
+func (w *Writer) writeBytesWithTypeCodeLocked(typeCode TypeCode, data []byte) error {
 	header := make([]byte, 16)
 	binary.BigEndian.PutUint32(header[0:4], uint32(len(data)))
 	binary.BigEndian.PutUint32(header[4:8], crc32.ChecksumIEEE(data))
 	binary.BigEndian.PutUint32(header[8:12], 0) // Flags
 	binary.BigEndian.PutUint32(header[12:16], uint32(typeCode))
-
-	w.fileMutex.Lock()
-	defer w.fileMutex.Unlock()
 
 	if _, err := w.f.Write(header); err != nil {
 		return err
@@ -155,21 +223,25 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 	targetPod := filters["pod"]
 	latestOnly := filters["latest_only"] == "true"
 
+	// Flush current shard so we can read from it
 	w.fileMutex.Lock()
-	defer w.fileMutex.Unlock()
+	if w.f != nil {
+		w.f.Sync()
+	}
+	w.fileMutex.Unlock()
 
-	if _, err := w.f.Seek(0, 0); err != nil {
+	entries, err := os.ReadDir(w.dir)
+	if err != nil {
 		return nil, err
 	}
 
-	// We need a way to map TypeCode back to proto.Message types.
-	// We'll have to use the typeCodes mapping.
-	w.typeCodesMutex.Lock()
-	typeByCode := make(map[TypeCode]string)
-	for name, code := range w.typeCodes {
-		typeByCode[code] = name
+	var files []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "shard-") && strings.HasSuffix(entry.Name(), ".bin") {
+			files = append(files, filepath.Join(w.dir, entry.Name()))
+		}
 	}
-	w.typeCodesMutex.Unlock()
+	sort.Strings(files)
 
 	var results []proto.Message
 	type podKey struct {
@@ -178,79 +250,89 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 	}
 	latestMetrics := make(map[podKey]*colmetricspb.ExportMetricsServiceRequest)
 
-	for {
-		header := make([]byte, 16)
-		if _, err := io.ReadFull(w.f, header); err != nil {
-			if err == io.EOF {
-				break
+	for _, file := range files {
+		func() {
+			f, err := os.Open(file)
+			if err != nil {
+				log.Printf("failed to open shard %s for reading: %v", file, err)
+				return
 			}
-			return nil, err
-		}
+			defer f.Close()
 
-		length := binary.BigEndian.Uint32(header[0:4])
-		// crc := binary.BigEndian.Uint32(header[4:8])
-		// flags := binary.BigEndian.Uint32(header[8:12])
-		typeCode := TypeCode(binary.BigEndian.Uint32(header[12:16]))
+			typeByCode := make(map[TypeCode]string)
 
-		data := make([]byte, length)
-		if _, err := io.ReadFull(w.f, data); err != nil {
-			return nil, err
-		}
+			for {
+				header := make([]byte, 16)
+				if _, err := io.ReadFull(f, header); err != nil {
+					if err != io.EOF {
+						log.Printf("failed to read header from %s: %v", file, err)
+					}
+					break
+				}
 
-		if typeCode == TypeCode_ObjectType {
-			// Skip type mapping objects for now, as they are already in memory.
-			continue
-		}
+				length := binary.BigEndian.Uint32(header[0:4])
+				typeCode := TypeCode(binary.BigEndian.Uint32(header[12:16]))
 
-		typeName, ok := typeByCode[typeCode]
-		if !ok {
-			continue
-		}
+				data := make([]byte, length)
+				if _, err := io.ReadFull(f, data); err != nil {
+					log.Printf("failed to read data from %s: %v", file, err)
+					break
+				}
 
-		// Use the proto registry or some other mechanism to create a message of the correct type.
-		// For simplicity, we'll assume we know the types we care about.
-		// In a real implementation, we would use dynamic messages.
-		msg, err := createMessage(typeName)
-		if err != nil {
-			log.Printf("error creating message for type %s: %v", typeName, err)
-			continue
-		}
+				if typeCode == TypeCode_ObjectType {
+					obj := &pb.ObjectType{}
+					if err := obj.Unmarshal(data); err == nil {
+						typeByCode[TypeCode(obj.TypeCode)] = obj.TypeName
+					}
+					continue
+				}
 
-		if err := proto.Unmarshal(data, msg); err != nil {
-			log.Printf("error unmarshaling message for type %s: %v", typeName, err)
-			continue
-		}
+				typeName, ok := typeByCode[typeCode]
+				if !ok {
+					continue
+				}
 
-		// Filter based on query
-		if mreq, ok := msg.(*colmetricspb.ExportMetricsServiceRequest); ok {
-			if latestOnly {
-				for _, rm := range mreq.ResourceMetrics {
-					if matchesResource(rm, targetNamespace, targetPod) {
-						if targetMetric == "" || matchesMetricName(rm, targetMetric) {
-							var resPodName, resNamespace string
-							for _, attr := range rm.Resource.Attributes {
-								if attr.Key == "k8s.pod.name" {
-									resPodName = attr.Value.GetStringValue()
-								} else if attr.Key == "k8s.namespace.name" {
-									resNamespace = attr.Value.GetStringValue()
+				msg, err := createMessage(typeName)
+				if err != nil {
+					log.Printf("error creating message for type %s: %v", typeName, err)
+					continue
+				}
+
+				if err := proto.Unmarshal(data, msg); err != nil {
+					log.Printf("error unmarshaling message for type %s: %v", typeName, err)
+					continue
+				}
+
+				if mreq, ok := msg.(*colmetricspb.ExportMetricsServiceRequest); ok {
+					if latestOnly {
+						for _, rm := range mreq.ResourceMetrics {
+							if matchesResource(rm, targetNamespace, targetPod) {
+								if targetMetric == "" || matchesMetricName(rm, targetMetric) {
+									var resPodName, resNamespace string
+									for _, attr := range rm.Resource.Attributes {
+										if attr.Key == "k8s.pod.name" {
+											resPodName = attr.Value.GetStringValue()
+										} else if attr.Key == "k8s.namespace.name" {
+											resNamespace = attr.Value.GetStringValue()
+										}
+									}
+									if resPodName != "" {
+										key := podKey{namespace: resNamespace, podName: resPodName}
+										latestMetrics[key] = mreq
+									}
 								}
 							}
-							if resPodName != "" {
-								key := podKey{namespace: resNamespace, podName: resPodName}
-								latestMetrics[key] = mreq
-							}
+						}
+					} else {
+						if matchesMetrics(mreq, targetMetric, targetNamespace, targetPod) {
+							results = append(results, mreq)
 						}
 					}
-				}
-			} else {
-				if matchesMetrics(mreq, targetMetric, targetNamespace, targetPod) {
-					results = append(results, mreq)
+				} else if targetMetric == "" && targetNamespace == "" && targetPod == "" {
+					results = append(results, msg)
 				}
 			}
-		} else if targetMetric == "" && targetNamespace == "" && targetPod == "" {
-			// If no filters, return everything
-			results = append(results, msg)
-		}
+		}()
 	}
 
 	if latestOnly {
@@ -263,11 +345,6 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 		}
 	}
 
-	// Seek back to the end of the file for subsequent writes.
-	if _, err := w.f.Seek(0, 2); err != nil {
-		return nil, err
-	}
-
 	return results, nil
 }
 
@@ -276,12 +353,7 @@ func matchesMetrics(req *colmetricspb.ExportMetricsServiceRequest, targetMetric,
 		if !matchesResource(rm, targetNamespace, targetPod) {
 			continue
 		}
-
-		if targetMetric == "" {
-			return true
-		}
-
-		if matchesMetricName(rm, targetMetric) {
+		if targetMetric == "" || matchesMetricName(rm, targetMetric) {
 			return true
 		}
 	}
@@ -321,7 +393,6 @@ func matchesMetricName(rm *metricspb.ResourceMetrics, targetMetric string) bool 
 	return false
 }
 
-// In a real implementation, this would be more robust.
 func createMessage(typeName string) (proto.Message, error) {
 	switch typeName {
 	case "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest":
