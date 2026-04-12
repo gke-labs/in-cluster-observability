@@ -33,6 +33,11 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
+
+	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/ext"
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 )
 
 type Registry struct {
@@ -80,6 +85,7 @@ type QueryResponse struct {
 type Server struct {
 	registry *Registry
 	pb.UnimplementedRegistrationServiceServer
+	pb.UnimplementedFrontendQueryServiceServer
 }
 
 func (s *Server) Register(stream pb.RegistrationService_RegisterServer) error {
@@ -138,6 +144,7 @@ func main() {
 	}
 	gs := grpc.NewServer()
 	pb.RegisterRegistrationServiceServer(gs, s)
+	pb.RegisterFrontendQueryServiceServer(gs, s)
 	log.Printf("gRPC server listening on %s", *grpcAddr)
 	go func() {
 		if err := gs.Serve(lis); err != nil {
@@ -436,4 +443,121 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFound(w, r)
+}
+
+func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.FrontendQueryResponse, error) {
+	// 1. Fetch ALL data from all sinks. We send an empty query string.
+	qreq := QueryRequest{Query: ""}
+	addresses := s.registry.GetAddresses()
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var allResults []json.RawMessage
+
+	for _, sinkAddr := range addresses {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			results, err := querySink(ctx, addr, qreq)
+			if err != nil {
+				log.Printf("error querying sink %s: %v", addr, err)
+				return
+			}
+			mu.Lock()
+			allResults = append(allResults, results...)
+			mu.Unlock()
+		}(sinkAddr)
+	}
+	wg.Wait()
+
+	// 2. Prepare CEL environments
+	var envOpts []cel.EnvOption
+	envOpts = append(envOpts, ext.NativeTypes(
+		&collogspb.ExportLogsServiceRequest{},
+		&colmetricspb.ExportMetricsServiceRequest{},
+		&coltracepb.ExportTraceServiceRequest{},
+	))
+
+	var varName string
+	switch req.Table {
+	case pb.Table_LOGS:
+		varName = "log"
+		envOpts = append(envOpts, cel.Variable(varName, cel.ObjectType("opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest")))
+	case pb.Table_TRACES:
+		varName = "trace"
+		envOpts = append(envOpts, cel.Variable(varName, cel.ObjectType("opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest")))
+	case pb.Table_METRICS:
+		varName = "metric"
+		envOpts = append(envOpts, cel.Variable(varName, cel.ObjectType("opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest")))
+	default:
+		return nil, fmt.Errorf("unsupported table type: %v", req.Table)
+	}
+
+	env, err := cel.NewEnv(envOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CEL env: %v", err)
+	}
+
+	// Compile filters
+	var programs []cel.Program
+	for _, f := range req.Filters {
+		ast, iss := env.Compile(f)
+		if iss.Err() != nil {
+			return nil, fmt.Errorf("failed to compile filter %q: %v", f, iss.Err())
+		}
+		prg, err := env.Program(ast)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create program for filter %q: %v", f, err)
+		}
+		programs = append(programs, prg)
+	}
+
+	// 3. Evaluate filters on results
+	var filteredResults [][]byte
+	for _, raw := range allResults {
+		var msg any
+		var err error
+
+		switch req.Table {
+		case pb.Table_LOGS:
+			var m collogspb.ExportLogsServiceRequest
+			err = protojson.Unmarshal(raw, &m)
+			msg = &m
+		case pb.Table_TRACES:
+			var m coltracepb.ExportTraceServiceRequest
+			err = protojson.Unmarshal(raw, &m)
+			msg = &m
+		case pb.Table_METRICS:
+			var m colmetricspb.ExportMetricsServiceRequest
+			err = protojson.Unmarshal(raw, &m)
+			msg = &m
+		}
+
+		if err != nil {
+			// Not all returned objects match the requested type, just skip them.
+			continue
+		}
+
+		match := true
+		for _, prg := range programs {
+			out, _, err := prg.Eval(map[string]any{
+				varName: msg,
+			})
+			if err != nil {
+				// Evaluation error means it doesn't match
+				match = false
+				break
+			}
+			if out.Value() != true {
+				match = false
+				break
+			}
+		}
+
+		if match {
+			filteredResults = append(filteredResults, raw)
+		}
+	}
+
+	return &pb.FrontendQueryResponse{Results: filteredResults}, nil
 }
