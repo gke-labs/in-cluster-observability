@@ -15,26 +15,17 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"strings"
-	"time"
 
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/klient"
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/client-go/kubernetes"
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	"k8s.io/client-go/tools/portforward"
-	"k8s.io/client-go/transport/spdy"
 )
 
 func main() {
@@ -56,79 +47,29 @@ func main() {
 	}
 
 	filters := os.Args[2:]
-
-	kubeConfigFlags := genericclioptions.NewConfigFlags(true)
-	config, err := kubeConfigFlags.ToRESTConfig()
-	if err != nil {
-		log.Fatalf("Failed to get kubeconfig: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Fatalf("Failed to create clientset: %v", err)
-	}
-
 	namespace := "observability-system"
 
-	pods, err := clientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: "app=opentelemetry-query-server",
-	})
+	pods, err := klient.ListPods(namespace, "app=opentelemetry-query-server")
 	if err != nil {
 		log.Fatalf("Failed to find query server pods: %v", err)
 	}
 
-	if len(pods.Items) == 0 {
+	if len(pods) == 0 {
 		log.Fatalf("No query server pods found in namespace %s", namespace)
 	}
 
-	pod := pods.Items[0]
+	podName := pods[0]
 
-	req := clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Namespace(namespace).
-		Name(pod.Name).
-		SubResource("portforward")
-
-	transport, upgrader, err := spdy.RoundTripperFor(config)
-	if err != nil {
-		log.Fatalf("Failed to create spdy roundtripper: %v", err)
+	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+		return klient.Dial(namespace, podName, 9443)
 	}
 
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, http.MethodPost, req.URL())
-
-	readyCh := make(chan struct{})
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-
-	// Pick an available port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		log.Fatalf("Failed to listen on ephemeral port: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close() // Release the port so portforward can bind to it
-
-	ports := []string{fmt.Sprintf("%d:9443", port)}
-	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
-
-	fw, err := portforward.New(dialer, ports, stopCh, readyCh, out, errOut)
-	if err != nil {
-		log.Fatalf("Failed to create portforward: %v", err)
-	}
-
-	go func() {
-		if err := fw.ForwardPorts(); err != nil {
-			log.Fatalf("Port forward failed: %v", err)
-		}
-	}()
-
-	select {
-	case <-readyCh:
-	case <-time.After(10 * time.Second):
-		log.Fatalf("Timed out waiting for port forward to be ready. errOut: %s", errOut.String())
-	}
-
-	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", port), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.DialContext(
+		context.Background(),
+		"in-process-transport",
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		log.Fatalf("Failed to connect to query server: %v", err)
 	}
