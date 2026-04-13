@@ -261,7 +261,9 @@ func querySink(ctx context.Context, addr string, qreq QueryRequest) ([][]byte, e
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, res.Result)
+		results = append(results, res.Metrics...)
+		results = append(results, res.Logs...)
+		results = append(results, res.Traces...)
 	}
 	return results, nil
 }
@@ -487,7 +489,8 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.FrontendQueryResponse, error) {
+func (s *Server) Query(req *pb.FrontendQueryRequest, stream grpc.ServerStreamingServer[pb.FrontendQueryResponse]) error {
+	ctx := stream.Context()
 	// 1. Fetch ALL data from all sinks. We send an empty query string.
 	qreq := QueryRequest{Query: ""}
 	addresses := s.registry.GetAddresses()
@@ -533,12 +536,12 @@ func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.F
 		varName = "metric"
 		envOpts = append(envOpts, cel.Variable(varName, cel.ObjectType("opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest")))
 	default:
-		return nil, fmt.Errorf("unsupported table type: %v", req.Table)
+		return fmt.Errorf("unsupported table type: %v", req.Table)
 	}
 
 	env, err := cel.NewEnv(envOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create CEL env: %v", err)
+		return fmt.Errorf("failed to create CEL env: %v", err)
 	}
 
 	// Compile filters
@@ -546,17 +549,16 @@ func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.F
 	for _, f := range req.Filters {
 		ast, iss := env.Compile(f)
 		if iss.Err() != nil {
-			return nil, fmt.Errorf("failed to compile filter %q: %v", f, iss.Err())
+			return fmt.Errorf("failed to compile filter %q: %v", f, iss.Err())
 		}
 		prg, err := env.Program(ast)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create program for filter %q: %v", f, err)
+			return fmt.Errorf("failed to create program for filter %q: %v", f, err)
 		}
 		programs = append(programs, prg)
 	}
 
 	// 3. Evaluate filters on results
-	var filteredResults [][]byte
 	for _, raw := range allResults {
 		var msg proto.Message
 		var err error
@@ -600,10 +602,12 @@ func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.F
 		if match {
 			b, err := protojson.Marshal(msg)
 			if err == nil {
-				filteredResults = append(filteredResults, b)
+				if err := stream.Send(&pb.FrontendQueryResponse{Results: [][]byte{b}}); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
-	return &pb.FrontendQueryResponse{Results: filteredResults}, nil
+	return nil
 }

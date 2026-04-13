@@ -5,7 +5,7 @@ package opentelemetry;
 option go_package = "github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb";
 
 service FrontendQueryService {
-  rpc Query(FrontendQueryRequest) returns (FrontendQueryResponse);
+  rpc Query(FrontendQueryRequest) returns (stream FrontendQueryResponse);
 }
 
 enum Table {

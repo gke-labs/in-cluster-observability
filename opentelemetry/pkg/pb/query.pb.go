@@ -184,9 +184,9 @@ const file_proto_query_proto_rawDesc = "" +
 	"\x04LOGS\x10\x01\x12\n" +
 	"\n" +
 	"\x06TRACES\x10\x02\x12\v\n" +
-	"\aMETRICS\x10\x032j\n" +
-	"\x14FrontendQueryService\x12R\n" +
-	"\x05Query\x12#.opentelemetry.FrontendQueryRequest\x1a$.opentelemetry.FrontendQueryResponseBCZAgithub.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pbb\x06proto3"
+	"\aMETRICS\x10\x032l\n" +
+	"\x14FrontendQueryService\x12T\n" +
+	"\x05Query\x12#.opentelemetry.FrontendQueryRequest\x1a$.opentelemetry.FrontendQueryResponse0\x01BCZAgithub.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pbb\x06proto3"
 
 var (
 	file_proto_query_proto_rawDescOnce sync.Once

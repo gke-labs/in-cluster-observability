@@ -162,8 +162,10 @@ func (x *QueryRequest) GetQuery() string {
 
 type QueryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Result is an OTLP message (e.g., ExportMetricsServiceRequest) marshaled to binary proto.
-	Result        []byte `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
+	// Elements are OTLP messages (e.g., ExportMetricsServiceRequest) marshaled to binary proto.
+	Metrics       [][]byte `protobuf:"bytes,1,rep,name=metrics,proto3" json:"metrics,omitempty"`
+	Logs          [][]byte `protobuf:"bytes,2,rep,name=logs,proto3" json:"logs,omitempty"`
+	Traces        [][]byte `protobuf:"bytes,3,rep,name=traces,proto3" json:"traces,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -198,9 +200,23 @@ func (*QueryResponse) Descriptor() ([]byte, []int) {
 	return file_proto_service_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *QueryResponse) GetResult() []byte {
+func (x *QueryResponse) GetMetrics() [][]byte {
 	if x != nil {
-		return x.Result
+		return x.Metrics
+	}
+	return nil
+}
+
+func (x *QueryResponse) GetLogs() [][]byte {
+	if x != nil {
+		return x.Logs
+	}
+	return nil
+}
+
+func (x *QueryResponse) GetTraces() [][]byte {
+	if x != nil {
+		return x.Traces
 	}
 	return nil
 }
@@ -214,9 +230,11 @@ const file_proto_service_proto_rawDesc = "" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\"\x12\n" +
 	"\x10RegisterResponse\"$\n" +
 	"\fQueryRequest\x12\x14\n" +
-	"\x05query\x18\x01 \x01(\tR\x05query\"'\n" +
-	"\rQueryResponse\x12\x16\n" +
-	"\x06result\x18\x01 \x01(\fR\x06result2f\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\"U\n" +
+	"\rQueryResponse\x12\x18\n" +
+	"\ametrics\x18\x01 \x03(\fR\ametrics\x12\x12\n" +
+	"\x04logs\x18\x02 \x03(\fR\x04logs\x12\x16\n" +
+	"\x06traces\x18\x03 \x03(\fR\x06traces2f\n" +
 	"\x13RegistrationService\x12O\n" +
 	"\bRegister\x12\x1e.opentelemetry.RegisterRequest\x1a\x1f.opentelemetry.RegisterResponse(\x010\x012T\n" +
 	"\fQueryService\x12D\n" +

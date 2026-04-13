@@ -46,6 +46,8 @@ message QueryRequest {
 }
 
 message QueryResponse {
-  // Result is an OTLP message (e.g., ExportMetricsServiceRequest) marshaled to binary proto.
-  bytes result = 1;
+  // Elements are OTLP messages (e.g., ExportMetricsServiceRequest) marshaled to binary proto.
+  repeated bytes metrics = 1;
+  repeated bytes logs = 2;
+  repeated bytes traces = 3;
 }
