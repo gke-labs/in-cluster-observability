@@ -71,7 +71,7 @@ func main() {
 	namespace := "observability-system"
 
 	pods, err := clientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: "app=opentelemetry-query-server",
+		LabelSelector: "app=observability-query-server",
 	})
 	if err != nil {
 		log.Fatalf("Failed to find query server pods: %v", err)

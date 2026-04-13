@@ -102,16 +102,16 @@ metadata:
   name: query-server
   namespace: observability-system
   labels:
-    app: query-server
+    app: observability-query-server
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: query-server
+      app: observability-query-server
   template:
     metadata:
       labels:
-        app: query-server
+        app: observability-query-server
     spec:
       containers:
       - name: query-server
@@ -140,7 +140,7 @@ metadata:
   namespace: observability-system
 spec:
   selector:
-    app: query-server
+    app: observability-query-server
   ports:
   - port: 443
     targetPort: 8443
