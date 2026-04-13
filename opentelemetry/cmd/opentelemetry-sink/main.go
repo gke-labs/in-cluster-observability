@@ -82,23 +82,24 @@ type queryServer struct {
 	pb.UnimplementedQueryServiceServer
 }
 
-func (s *queryServer) Query(ctx context.Context, req *pb.QueryRequest) (*pb.QueryResponse, error) {
-	results, err := s.writer.Query(ctx, req.Query)
+func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingServer[pb.QueryResponse]) error {
+	results, err := s.writer.Query(stream.Context(), req.Query)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var rawResults [][]byte
 	for _, res := range results {
-		b, err := protojson.Marshal(res)
+		b, err := proto.Marshal(res)
 		if err != nil {
 			log.Printf("error marshaling result: %v", err)
 			continue
 		}
-		rawResults = append(rawResults, b)
+		if err := stream.Send(&pb.QueryResponse{Result: b}); err != nil {
+			return err
+		}
 	}
 
-	return &pb.QueryResponse{Results: rawResults}, nil
+	return nil
 }
 
 type QueryRequest struct {

@@ -16,7 +16,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v3.21.12
-// source: service.proto
+// source: proto/service.proto
 
 package pb
 
@@ -45,7 +45,7 @@ type RegisterRequest struct {
 
 func (x *RegisterRequest) Reset() {
 	*x = RegisterRequest{}
-	mi := &file_service_proto_msgTypes[0]
+	mi := &file_proto_service_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -57,7 +57,7 @@ func (x *RegisterRequest) String() string {
 func (*RegisterRequest) ProtoMessage() {}
 
 func (x *RegisterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[0]
+	mi := &file_proto_service_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -70,7 +70,7 @@ func (x *RegisterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterRequest.ProtoReflect.Descriptor instead.
 func (*RegisterRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{0}
+	return file_proto_service_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *RegisterRequest) GetAddress() string {
@@ -88,7 +88,7 @@ type RegisterResponse struct {
 
 func (x *RegisterResponse) Reset() {
 	*x = RegisterResponse{}
-	mi := &file_service_proto_msgTypes[1]
+	mi := &file_proto_service_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -100,7 +100,7 @@ func (x *RegisterResponse) String() string {
 func (*RegisterResponse) ProtoMessage() {}
 
 func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[1]
+	mi := &file_proto_service_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -113,7 +113,7 @@ func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
 func (*RegisterResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{1}
+	return file_proto_service_proto_rawDescGZIP(), []int{1}
 }
 
 type QueryRequest struct {
@@ -125,7 +125,7 @@ type QueryRequest struct {
 
 func (x *QueryRequest) Reset() {
 	*x = QueryRequest{}
-	mi := &file_service_proto_msgTypes[2]
+	mi := &file_proto_service_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -137,7 +137,7 @@ func (x *QueryRequest) String() string {
 func (*QueryRequest) ProtoMessage() {}
 
 func (x *QueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[2]
+	mi := &file_proto_service_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -150,7 +150,7 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
 func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{2}
+	return file_proto_service_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *QueryRequest) GetQuery() string {
@@ -162,15 +162,15 @@ func (x *QueryRequest) GetQuery() string {
 
 type QueryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Results are OTLP messages (e.g., ExportMetricsServiceRequest) marshaled to JSON.
-	Results       [][]byte `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
+	// Result is an OTLP message (e.g., ExportMetricsServiceRequest) marshaled to binary proto.
+	Result        []byte `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_service_proto_msgTypes[3]
+	mi := &file_proto_service_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -182,7 +182,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[3]
+	mi := &file_proto_service_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -195,53 +195,53 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{3}
+	return file_proto_service_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *QueryResponse) GetResults() [][]byte {
+func (x *QueryResponse) GetResult() []byte {
 	if x != nil {
-		return x.Results
+		return x.Result
 	}
 	return nil
 }
 
-var File_service_proto protoreflect.FileDescriptor
+var File_proto_service_proto protoreflect.FileDescriptor
 
-const file_service_proto_rawDesc = "" +
+const file_proto_service_proto_rawDesc = "" +
 	"\n" +
-	"\rservice.proto\x12\ropentelemetry\"+\n" +
+	"\x13proto/service.proto\x12\ropentelemetry\"+\n" +
 	"\x0fRegisterRequest\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\"\x12\n" +
 	"\x10RegisterResponse\"$\n" +
 	"\fQueryRequest\x12\x14\n" +
-	"\x05query\x18\x01 \x01(\tR\x05query\")\n" +
-	"\rQueryResponse\x12\x18\n" +
-	"\aresults\x18\x01 \x03(\fR\aresults2f\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\"'\n" +
+	"\rQueryResponse\x12\x16\n" +
+	"\x06result\x18\x01 \x01(\fR\x06result2f\n" +
 	"\x13RegistrationService\x12O\n" +
-	"\bRegister\x12\x1e.opentelemetry.RegisterRequest\x1a\x1f.opentelemetry.RegisterResponse(\x010\x012R\n" +
-	"\fQueryService\x12B\n" +
-	"\x05Query\x12\x1b.opentelemetry.QueryRequest\x1a\x1c.opentelemetry.QueryResponseBCZAgithub.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pbb\x06proto3"
+	"\bRegister\x12\x1e.opentelemetry.RegisterRequest\x1a\x1f.opentelemetry.RegisterResponse(\x010\x012T\n" +
+	"\fQueryService\x12D\n" +
+	"\x05Query\x12\x1b.opentelemetry.QueryRequest\x1a\x1c.opentelemetry.QueryResponse0\x01BCZAgithub.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pbb\x06proto3"
 
 var (
-	file_service_proto_rawDescOnce sync.Once
-	file_service_proto_rawDescData []byte
+	file_proto_service_proto_rawDescOnce sync.Once
+	file_proto_service_proto_rawDescData []byte
 )
 
-func file_service_proto_rawDescGZIP() []byte {
-	file_service_proto_rawDescOnce.Do(func() {
-		file_service_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_service_proto_rawDesc), len(file_service_proto_rawDesc)))
+func file_proto_service_proto_rawDescGZIP() []byte {
+	file_proto_service_proto_rawDescOnce.Do(func() {
+		file_proto_service_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_service_proto_rawDesc), len(file_proto_service_proto_rawDesc)))
 	})
-	return file_service_proto_rawDescData
+	return file_proto_service_proto_rawDescData
 }
 
-var file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_service_proto_goTypes = []any{
+var file_proto_service_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_service_proto_goTypes = []any{
 	(*RegisterRequest)(nil),  // 0: opentelemetry.RegisterRequest
 	(*RegisterResponse)(nil), // 1: opentelemetry.RegisterResponse
 	(*QueryRequest)(nil),     // 2: opentelemetry.QueryRequest
 	(*QueryResponse)(nil),    // 3: opentelemetry.QueryResponse
 }
-var file_service_proto_depIdxs = []int32{
+var file_proto_service_proto_depIdxs = []int32{
 	0, // 0: opentelemetry.RegistrationService.Register:input_type -> opentelemetry.RegisterRequest
 	2, // 1: opentelemetry.QueryService.Query:input_type -> opentelemetry.QueryRequest
 	1, // 2: opentelemetry.RegistrationService.Register:output_type -> opentelemetry.RegisterResponse
@@ -253,26 +253,26 @@ var file_service_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for field type_name
 }
 
-func init() { file_service_proto_init() }
-func file_service_proto_init() {
-	if File_service_proto != nil {
+func init() { file_proto_service_proto_init() }
+func file_proto_service_proto_init() {
+	if File_proto_service_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_service_proto_rawDesc), len(file_service_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_service_proto_rawDesc), len(file_proto_service_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
-		GoTypes:           file_service_proto_goTypes,
-		DependencyIndexes: file_service_proto_depIdxs,
-		MessageInfos:      file_service_proto_msgTypes,
+		GoTypes:           file_proto_service_proto_goTypes,
+		DependencyIndexes: file_proto_service_proto_depIdxs,
+		MessageInfos:      file_proto_service_proto_msgTypes,
 	}.Build()
-	File_service_proto = out.File
-	file_service_proto_goTypes = nil
-	file_service_proto_depIdxs = nil
+	File_proto_service_proto = out.File
+	file_proto_service_proto_goTypes = nil
+	file_proto_service_proto_depIdxs = nil
 }

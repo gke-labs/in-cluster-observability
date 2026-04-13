@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 
@@ -190,7 +191,7 @@ func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
 	addresses := s.registry.GetAddresses()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var allResults []json.RawMessage
+	var allResults [][]byte
 
 	for _, sinkAddr := range addresses {
 		wg.Add(1)
@@ -208,14 +209,37 @@ func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
-	log.Printf("Query response for %q: %d results", qreq.Query, len(allResults))
-	resp := QueryResponse{Results: allResults}
+	var rawResults []json.RawMessage
+	for _, raw := range allResults {
+		var msg proto.Message
+		var mLog collogspb.ExportLogsServiceRequest
+		var mMetric colmetricspb.ExportMetricsServiceRequest
+		var mTrace coltracepb.ExportTraceServiceRequest
+
+		if err := proto.Unmarshal(raw, &mLog); err == nil && len(mLog.ResourceLogs) > 0 {
+			msg = &mLog
+		} else if err := proto.Unmarshal(raw, &mMetric); err == nil && len(mMetric.ResourceMetrics) > 0 {
+			msg = &mMetric
+		} else if err := proto.Unmarshal(raw, &mTrace); err == nil && len(mTrace.ResourceSpans) > 0 {
+			msg = &mTrace
+		} else {
+			continue
+		}
+
+		b, err := protojson.Marshal(msg)
+		if err == nil {
+			rawResults = append(rawResults, json.RawMessage(b))
+		}
+	}
+
+	log.Printf("Query response for %q: %d results", qreq.Query, len(rawResults))
+	resp := QueryResponse{Results: rawResults}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("error encoding response: %v", err)
 	}
 }
 
-func querySink(ctx context.Context, addr string, qreq QueryRequest) ([]json.RawMessage, error) {
+func querySink(ctx context.Context, addr string, qreq QueryRequest) ([][]byte, error) {
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	if err != nil {
 		return nil, err
@@ -223,14 +247,21 @@ func querySink(ctx context.Context, addr string, qreq QueryRequest) ([]json.RawM
 	defer conn.Close()
 
 	client := pb.NewQueryServiceClient(conn)
-	resp, err := client.Query(ctx, &pb.QueryRequest{Query: qreq.Query})
+	stream, err := client.Query(ctx, &pb.QueryRequest{Query: qreq.Query})
 	if err != nil {
 		return nil, err
 	}
 
-	var results []json.RawMessage
-	for _, res := range resp.Results {
-		results = append(results, json.RawMessage(res))
+	var results [][]byte
+	for {
+		res, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res.Result)
 	}
 	return results, nil
 }
@@ -324,7 +355,7 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 		addresses := s.registry.GetAddresses()
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		var allResults []json.RawMessage
+		var allResults [][]byte
 
 		for _, sinkAddr := range addresses {
 			wg.Add(1)
@@ -353,7 +384,7 @@ func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
 
 		for _, raw := range allResults {
 			var mreq colmetricspb.ExportMetricsServiceRequest
-			if err := protojson.Unmarshal(raw, &mreq); err != nil {
+			if err := proto.Unmarshal(raw, &mreq); err != nil {
 				log.Printf("failed to unmarshal OTLP metrics: %v", err)
 				continue
 			}
@@ -463,7 +494,7 @@ func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.F
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var allResults []json.RawMessage
+	var allResults [][]byte
 
 	for _, sinkAddr := range addresses {
 		wg.Add(1)
@@ -527,21 +558,21 @@ func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.F
 	// 3. Evaluate filters on results
 	var filteredResults [][]byte
 	for _, raw := range allResults {
-		var msg any
+		var msg proto.Message
 		var err error
 
 		switch req.Table {
 		case pb.Table_LOGS:
 			var m collogspb.ExportLogsServiceRequest
-			err = protojson.Unmarshal(raw, &m)
+			err = proto.Unmarshal(raw, &m)
 			msg = &m
 		case pb.Table_TRACES:
 			var m coltracepb.ExportTraceServiceRequest
-			err = protojson.Unmarshal(raw, &m)
+			err = proto.Unmarshal(raw, &m)
 			msg = &m
 		case pb.Table_METRICS:
 			var m colmetricspb.ExportMetricsServiceRequest
-			err = protojson.Unmarshal(raw, &m)
+			err = proto.Unmarshal(raw, &m)
 			msg = &m
 		}
 
@@ -567,7 +598,10 @@ func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.F
 		}
 
 		if match {
-			filteredResults = append(filteredResults, raw)
+			b, err := protojson.Marshal(msg)
+			if err == nil {
+				filteredResults = append(filteredResults, b)
+			}
 		}
 	}
 
