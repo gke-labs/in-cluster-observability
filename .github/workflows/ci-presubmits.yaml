@@ -23,3 +23,114 @@ on:
   merge_group:
 
 jobs:
+  ap-build:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS: /tmp/artifacts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-build
+        run: ./dev/ci/presubmits/ap-build
+  ap-e2e:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS: /tmp/artifacts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-e2e
+        run: ./dev/ci/presubmits/ap-e2e
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-ap-e2e
+          path: /tmp/artifacts
+  ap-e2e-opentelemetry:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS: /tmp/artifacts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-e2e-opentelemetry
+        run: ./dev/ci/presubmits/ap-e2e-opentelemetry
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-ap-e2e-opentelemetry
+          path: /tmp/artifacts
+  ap-lint:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS: /tmp/artifacts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-lint
+        run: ./dev/ci/presubmits/ap-lint
+  ap-test:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS: /tmp/artifacts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-test
+        run: ./dev/ci/presubmits/ap-test
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-ap-test
+          path: /tmp/artifacts
+  ap-verify-generate:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS: /tmp/artifacts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run ap-verify-generate
+        run: ./dev/ci/presubmits/ap-verify-generate
