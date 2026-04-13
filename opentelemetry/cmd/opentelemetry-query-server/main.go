@@ -35,6 +35,8 @@ import (
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 
 	"github.com/google/cel-go/cel"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 )
@@ -126,6 +128,15 @@ func main() {
 	tlsKeyFile := flag.String("tls-private-key-file", "", "TLS private key file")
 	flag.Parse()
 
+	shutdown, err := initOtel(context.Background())
+	if err != nil {
+		log.Printf("failed to initialize OpenTelemetry: %v", err)
+	} else {
+		defer func() {
+			_ = shutdown(context.Background())
+		}()
+	}
+
 	s := &Server{
 		registry: &Registry{
 			addresses: make(map[string]int),
@@ -141,7 +152,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen on gRPC: %v", err)
 	}
-	gs := grpc.NewServer()
+	gs := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	pb.RegisterRegistrationServiceServer(gs, s)
 	pb.RegisterFrontendQueryServiceServer(gs, s)
 	log.Printf("gRPC server listening on %s", *grpcAddr)
@@ -151,13 +162,14 @@ func main() {
 		}
 	}()
 
+	handler := otelhttp.NewHandler(http.DefaultServeMux, "query-server")
 	log.Printf("query-server listening on %s", *addr)
 	if *tlsCertFile != "" && *tlsKeyFile != "" {
-		if err := http.ListenAndServeTLS(*addr, *tlsCertFile, *tlsKeyFile, nil); err != nil {
+		if err := http.ListenAndServeTLS(*addr, *tlsCertFile, *tlsKeyFile, handler); err != nil {
 			log.Fatalf("failed to listen (TLS): %v", err)
 		}
 	} else {
-		if err := http.ListenAndServe(*addr, nil); err != nil {
+		if err := http.ListenAndServe(*addr, handler); err != nil {
 			log.Fatalf("failed to listen: %v", err)
 		}
 	}
@@ -204,7 +216,7 @@ func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func querySink(ctx context.Context, addr string, qreq QueryRequest) ([]json.RawMessage, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	if err != nil {
 		return nil, err
 	}

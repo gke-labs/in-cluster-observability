@@ -119,6 +119,9 @@ spec:
         args:
         - "--tls-cert-file=/certs/tls.crt"
         - "--tls-private-key-file=/certs/tls.key"
+        env:
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetry-node-agent.observability-system:4317"
         ports:
         - containerPort: 8443
           name: https
