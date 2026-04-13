@@ -147,6 +147,7 @@ func main() {
 	http.HandleFunc("/query", s.queryHandler)
 	http.HandleFunc("/apis", s.apisHandler)
 	http.HandleFunc("/apis/", s.apisHandler)
+	http.HandleFunc("/ui/", s.uiHandler)
 
 	// Start gRPC server for registrations
 	lis, err := net.Listen("tcp", *grpcAddr)

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<!--
+ Copyright 2026 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+<html>
+<head>
+    <title>OpenTelemetry Explorer</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        #traces-list { list-style: none; padding: 0; }
+        .trace-item { background: white; margin-bottom: 10px; padding: 15px; border-radius: 4px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .trace-item:hover { background: #fafafa; }
+        #trace-detail { display: none; background: white; padding: 20px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-top: 20px; }
+        .back-btn { margin-bottom: 15px; cursor: pointer; color: #0066cc; text-decoration: underline; }
+        .waterfall { position: relative; border-left: 1px solid #ccc; margin-top: 20px; padding-bottom: 20px; }
+        .span-row { position: relative; height: 30px; border-bottom: 1px solid #eee; display: flex; align-items: center; }
+        .span-row:hover { background: #f9f9f9; }
+        .span-bar { position: absolute; height: 16px; border-radius: 3px; background: #4caf50; top: 7px; min-width: 2px; }
+        .span-name { position: absolute; left: 10px; z-index: 10; font-size: 12px; pointer-events: none; color: #333; text-shadow: 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff; white-space: nowrap; }
+        .span-details { display: none; padding: 10px; background: #f0f0f0; font-size: 12px; border-bottom: 1px solid #ddd; overflow-x: auto; }
+        .span-row.expanded + .span-details { display: block; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>OpenTelemetry Traces</h1>
+        <button onclick="loadData()">Refresh</button>
+    </div>
+    
+    <div id="loading">Loading...</div>
+    
+    <ul id="traces-list"></ul>
+    
+    <div id="trace-detail">
+        <div class="back-btn" onclick="showList()">&larr; Back to Traces</div>
+        <h2 id="trace-id-title"></h2>
+        <div id="trace-waterfall" class="waterfall"></div>
+    </div>
+
+    <script>
+        let allTraces = {};
+
+        async function loadData() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('traces-list').style.display = 'none';
+            document.getElementById('trace-detail').style.display = 'none';
+            allTraces = {};
+
+            try {
+                const res = await fetch('/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: '' })
+                });
+                const data = await res.json();
+                
+                if (data.results) {
+                    data.results.forEach(raw => {
+                        if (raw.resourceSpans) {
+                            raw.resourceSpans.forEach(rs => {
+                                rs.scopeSpans?.forEach(ss => {
+                                    ss.spans?.forEach(span => {
+                                        const traceId = span.traceId;
+                                        if (!allTraces[traceId]) {
+                                            allTraces[traceId] = [];
+                                        }
+                                        allTraces[traceId].push(span);
+                                    });
+                                });
+                            });
+                        }
+                    });
+                }
+                
+                renderList();
+            } catch (err) {
+                console.error(err);
+                document.getElementById('loading').innerText = 'Error loading data.';
+            }
+        }
+
+        function renderList() {
+            document.getElementById('loading').style.display = 'none';
+            const list = document.getElementById('traces-list');
+            list.style.display = 'block';
+            list.innerHTML = '';
+
+            const traces = Object.keys(allTraces).map(traceId => {
+                const spans = allTraces[traceId];
+                let minTime = null;
+                let maxTime = null;
+                spans.forEach(s => {
+                    const st = BigInt(s.startTimeUnixNano || 0);
+                    const et = BigInt(s.endTimeUnixNano || 0);
+                    if (minTime === null || st < minTime) minTime = st;
+                    if (maxTime === null || et > maxTime) maxTime = et;
+                });
+                const duration = maxTime - minTime;
+                return { traceId, spans, minTime, maxTime, duration };
+            });
+
+            traces.sort((a, b) => a.maxTime < b.maxTime ? 1 : -1);
+
+            traces.forEach(t => {
+                const li = document.createElement('li');
+                li.className = 'trace-item';
+                const durationMs = Number(t.duration) / 1000000;
+                li.innerHTML = `<strong>Trace ID:</strong> ${t.traceId} <br> 
+                                <strong>Spans:</strong> ${t.spans.length} <br>
+                                <strong>Duration:</strong> ${durationMs.toFixed(2)} ms`;
+                li.onclick = () => renderTrace(t);
+                list.appendChild(li);
+            });
+            
+            if (traces.length === 0) {
+                list.innerHTML = '<li>No traces found.</li>';
+            }
+        }
+
+        function showList() {
+            document.getElementById('traces-list').style.display = 'block';
+            document.getElementById('trace-detail').style.display = 'none';
+        }
+
+        function renderTrace(trace) {
+            document.getElementById('traces-list').style.display = 'none';
+            document.getElementById('trace-detail').style.display = 'block';
+            document.getElementById('trace-id-title').innerText = `Trace: ${trace.traceId}`;
+            
+            const waterfall = document.getElementById('trace-waterfall');
+            waterfall.innerHTML = '';
+
+            trace.spans.sort((a, b) => {
+                const ast = BigInt(a.startTimeUnixNano || 0);
+                const bst = BigInt(b.startTimeUnixNano || 0);
+                return ast < bst ? -1 : (ast > bst ? 1 : 0);
+            });
+
+            trace.spans.forEach(span => {
+                const st = BigInt(span.startTimeUnixNano || 0);
+                const et = BigInt(span.endTimeUnixNano || 0);
+                
+                let leftPct = 0;
+                let widthPct = 0.1;
+                
+                if (trace.duration > 0n) {
+                    leftPct = Number(st - trace.minTime) / Number(trace.duration) * 100;
+                    widthPct = Math.max(Number(et - st) / Number(trace.duration) * 100, 0.1);
+                }
+
+                const row = document.createElement('div');
+                row.className = 'span-row';
+                
+                const bar = document.createElement('div');
+                bar.className = 'span-bar';
+                bar.style.left = `${leftPct}%`;
+                bar.style.width = `${widthPct}%`;
+                
+                const name = document.createElement('div');
+                name.className = 'span-name';
+                name.innerText = span.name || '(unnamed span)';
+                
+                row.appendChild(bar);
+                row.appendChild(name);
+                
+                const details = document.createElement('div');
+                details.className = 'span-details';
+                details.innerHTML = `<pre>${JSON.stringify(span, null, 2)}</pre>`;
+                
+                row.onclick = () => {
+                    row.classList.toggle('expanded');
+                };
+
+                waterfall.appendChild(row);
+                waterfall.appendChild(details);
+            });
+        }
+
+        window.onload = loadData;
+    </script>
+</body>
+</html>
