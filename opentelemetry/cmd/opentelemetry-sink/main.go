@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -36,9 +37,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
-
-	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 )
 
 type traceServer struct {
@@ -100,8 +100,8 @@ func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingSer
 						singleReq := &colmetricspb.ExportMetricsServiceRequest{
 							ResourceMetrics: []*metricspb.ResourceMetrics{
 								{
-									Resource:     rm.Resource,
-									SchemaUrl:    rm.SchemaUrl,
+									Resource:  rm.Resource,
+									SchemaUrl: rm.SchemaUrl,
 									ScopeMetrics: []*metricspb.ScopeMetrics{
 										{
 											Scope:     sm.Scope,
@@ -115,6 +115,11 @@ func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingSer
 						b, err := proto.Marshal(singleReq)
 						if err != nil {
 							log.Printf("error marshaling metric: %v", err)
+							continue
+						}
+						if len(b) > 4194304 {
+							txt, _ := prototext.Marshal(singleReq)
+							log.Printf("metric message exceeds gRPC max size (4MB). size=%d, msg=%s", len(b), txt)
 							continue
 						}
 						if err := stream.Send(&pb.QueryResponse{Metrics: [][]byte{b}}); err != nil {
@@ -147,6 +152,11 @@ func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingSer
 							log.Printf("error marshaling log: %v", err)
 							continue
 						}
+						if len(b) > 4194304 {
+							txt, _ := prototext.Marshal(singleReq)
+							log.Printf("log message exceeds gRPC max size (4MB). size=%d, msg=%s", len(b), txt)
+							continue
+						}
 						if err := stream.Send(&pb.QueryResponse{Logs: [][]byte{b}}); err != nil {
 							return err
 						}
@@ -160,8 +170,8 @@ func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingSer
 						singleReq := &coltracepb.ExportTraceServiceRequest{
 							ResourceSpans: []*tracepb.ResourceSpans{
 								{
-									Resource:   rs.Resource,
-									SchemaUrl:  rs.SchemaUrl,
+									Resource:  rs.Resource,
+									SchemaUrl: rs.SchemaUrl,
 									ScopeSpans: []*tracepb.ScopeSpans{
 										{
 											Scope:     ss.Scope,
@@ -175,6 +185,11 @@ func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingSer
 						b, err := proto.Marshal(singleReq)
 						if err != nil {
 							log.Printf("error marshaling trace: %v", err)
+							continue
+						}
+						if len(b) > 4194304 {
+							txt, _ := prototext.Marshal(singleReq)
+							log.Printf("trace message exceeds gRPC max size (4MB). size=%d, msg=%s", len(b), txt)
 							continue
 						}
 						if err := stream.Send(&pb.QueryResponse{Traces: [][]byte{b}}); err != nil {
