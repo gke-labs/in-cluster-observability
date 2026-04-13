@@ -261,7 +261,9 @@ func querySink(ctx context.Context, addr string, qreq QueryRequest) ([][]byte, e
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, res.Result)
+		results = append(results, res.Metrics...)
+		results = append(results, res.Logs...)
+		results = append(results, res.Traces...)
 	}
 	return results, nil
 }
