@@ -35,7 +35,6 @@ import (
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 
 	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/ext"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 )
@@ -472,7 +471,8 @@ func (s *Server) Query(ctx context.Context, req *pb.FrontendQueryRequest) (*pb.F
 
 	// 2. Prepare CEL environments
 	var envOpts []cel.EnvOption
-	envOpts = append(envOpts, ext.NativeTypes(
+	// TODO: Maybe we should wrap the protobuf types to avoid a dependency on a proto we do not control (and then we would use ext.NativeTypes).
+	envOpts = append(envOpts, cel.Types(
 		&collogspb.ExportLogsServiceRequest{},
 		&colmetricspb.ExportMetricsServiceRequest{},
 		&coltracepb.ExportTraceServiceRequest{},
