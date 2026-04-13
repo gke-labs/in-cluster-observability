@@ -16,7 +16,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v3.21.12
-// source: service.proto
+// source: proto/service.proto
 
 package pb
 
@@ -135,7 +135,7 @@ var RegistrationService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "service.proto",
+	Metadata: "proto/service.proto",
 }
 
 const (
@@ -149,7 +149,7 @@ const (
 // QueryService is hosted on the sink and used by the query server to query it.
 type QueryServiceClient interface {
 	// Query executes a query on the sink.
-	Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (*QueryResponse, error)
+	Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResponse], error)
 }
 
 type queryServiceClient struct {
@@ -160,15 +160,24 @@ func NewQueryServiceClient(cc grpc.ClientConnInterface) QueryServiceClient {
 	return &queryServiceClient{cc}
 }
 
-func (c *queryServiceClient) Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (*QueryResponse, error) {
+func (c *queryServiceClient) Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(QueryResponse)
-	err := c.cc.Invoke(ctx, QueryService_Query_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &QueryService_ServiceDesc.Streams[0], QueryService_Query_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[QueryRequest, QueryResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type QueryService_QueryClient = grpc.ServerStreamingClient[QueryResponse]
 
 // QueryServiceServer is the server API for QueryService service.
 // All implementations must embed UnimplementedQueryServiceServer
@@ -177,7 +186,7 @@ func (c *queryServiceClient) Query(ctx context.Context, in *QueryRequest, opts .
 // QueryService is hosted on the sink and used by the query server to query it.
 type QueryServiceServer interface {
 	// Query executes a query on the sink.
-	Query(context.Context, *QueryRequest) (*QueryResponse, error)
+	Query(*QueryRequest, grpc.ServerStreamingServer[QueryResponse]) error
 	mustEmbedUnimplementedQueryServiceServer()
 }
 
@@ -188,8 +197,8 @@ type QueryServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedQueryServiceServer struct{}
 
-func (UnimplementedQueryServiceServer) Query(context.Context, *QueryRequest) (*QueryResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method Query not implemented")
+func (UnimplementedQueryServiceServer) Query(*QueryRequest, grpc.ServerStreamingServer[QueryResponse]) error {
+	return status.Error(codes.Unimplemented, "method Query not implemented")
 }
 func (UnimplementedQueryServiceServer) mustEmbedUnimplementedQueryServiceServer() {}
 func (UnimplementedQueryServiceServer) testEmbeddedByValue()                      {}
@@ -212,23 +221,16 @@ func RegisterQueryServiceServer(s grpc.ServiceRegistrar, srv QueryServiceServer)
 	s.RegisterService(&QueryService_ServiceDesc, srv)
 }
 
-func _QueryService_Query_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(QueryRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _QueryService_Query_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(QueryRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(QueryServiceServer).Query(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: QueryService_Query_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(QueryServiceServer).Query(ctx, req.(*QueryRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(QueryServiceServer).Query(m, &grpc.GenericServerStream[QueryRequest, QueryResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type QueryService_QueryServer = grpc.ServerStreamingServer[QueryResponse]
 
 // QueryService_ServiceDesc is the grpc.ServiceDesc for QueryService service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -236,12 +238,13 @@ func _QueryService_Query_Handler(srv interface{}, ctx context.Context, dec func(
 var QueryService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "opentelemetry.QueryService",
 	HandlerType: (*QueryServiceServer)(nil),
-	Methods: []grpc.MethodDesc{
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "Query",
-			Handler:    _QueryService_Query_Handler,
+			StreamName:    "Query",
+			Handler:       _QueryService_Query_Handler,
+			ServerStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
-	Metadata: "service.proto",
+	Metadata: "proto/service.proto",
 }

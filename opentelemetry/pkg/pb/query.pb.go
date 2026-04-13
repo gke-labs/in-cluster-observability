@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v3.21.12
-// source: query.proto
+// source: proto/query.proto
 
 package pb
 
@@ -57,11 +57,11 @@ func (x Table) String() string {
 }
 
 func (Table) Descriptor() protoreflect.EnumDescriptor {
-	return file_query_proto_enumTypes[0].Descriptor()
+	return file_proto_query_proto_enumTypes[0].Descriptor()
 }
 
 func (Table) Type() protoreflect.EnumType {
-	return &file_query_proto_enumTypes[0]
+	return &file_proto_query_proto_enumTypes[0]
 }
 
 func (x Table) Number() protoreflect.EnumNumber {
@@ -70,7 +70,7 @@ func (x Table) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Table.Descriptor instead.
 func (Table) EnumDescriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{0}
+	return file_proto_query_proto_rawDescGZIP(), []int{0}
 }
 
 type FrontendQueryRequest struct {
@@ -83,7 +83,7 @@ type FrontendQueryRequest struct {
 
 func (x *FrontendQueryRequest) Reset() {
 	*x = FrontendQueryRequest{}
-	mi := &file_query_proto_msgTypes[0]
+	mi := &file_proto_query_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -95,7 +95,7 @@ func (x *FrontendQueryRequest) String() string {
 func (*FrontendQueryRequest) ProtoMessage() {}
 
 func (x *FrontendQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[0]
+	mi := &file_proto_query_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -108,7 +108,7 @@ func (x *FrontendQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FrontendQueryRequest.ProtoReflect.Descriptor instead.
 func (*FrontendQueryRequest) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{0}
+	return file_proto_query_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *FrontendQueryRequest) GetTable() Table {
@@ -134,7 +134,7 @@ type FrontendQueryResponse struct {
 
 func (x *FrontendQueryResponse) Reset() {
 	*x = FrontendQueryResponse{}
-	mi := &file_query_proto_msgTypes[1]
+	mi := &file_proto_query_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -146,7 +146,7 @@ func (x *FrontendQueryResponse) String() string {
 func (*FrontendQueryResponse) ProtoMessage() {}
 
 func (x *FrontendQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[1]
+	mi := &file_proto_query_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -159,7 +159,7 @@ func (x *FrontendQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FrontendQueryResponse.ProtoReflect.Descriptor instead.
 func (*FrontendQueryResponse) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{1}
+	return file_proto_query_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *FrontendQueryResponse) GetResults() [][]byte {
@@ -169,11 +169,11 @@ func (x *FrontendQueryResponse) GetResults() [][]byte {
 	return nil
 }
 
-var File_query_proto protoreflect.FileDescriptor
+var File_proto_query_proto protoreflect.FileDescriptor
 
-const file_query_proto_rawDesc = "" +
+const file_proto_query_proto_rawDesc = "" +
 	"\n" +
-	"\vquery.proto\x12\ropentelemetry\"\\\n" +
+	"\x11proto/query.proto\x12\ropentelemetry\"\\\n" +
 	"\x14FrontendQueryRequest\x12*\n" +
 	"\x05table\x18\x01 \x01(\x0e2\x14.opentelemetry.TableR\x05table\x12\x18\n" +
 	"\afilters\x18\x02 \x03(\tR\afilters\"1\n" +
@@ -189,25 +189,25 @@ const file_query_proto_rawDesc = "" +
 	"\x05Query\x12#.opentelemetry.FrontendQueryRequest\x1a$.opentelemetry.FrontendQueryResponseBCZAgithub.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pbb\x06proto3"
 
 var (
-	file_query_proto_rawDescOnce sync.Once
-	file_query_proto_rawDescData []byte
+	file_proto_query_proto_rawDescOnce sync.Once
+	file_proto_query_proto_rawDescData []byte
 )
 
-func file_query_proto_rawDescGZIP() []byte {
-	file_query_proto_rawDescOnce.Do(func() {
-		file_query_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_query_proto_rawDesc), len(file_query_proto_rawDesc)))
+func file_proto_query_proto_rawDescGZIP() []byte {
+	file_proto_query_proto_rawDescOnce.Do(func() {
+		file_proto_query_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_query_proto_rawDesc), len(file_proto_query_proto_rawDesc)))
 	})
-	return file_query_proto_rawDescData
+	return file_proto_query_proto_rawDescData
 }
 
-var file_query_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_query_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
-var file_query_proto_goTypes = []any{
+var file_proto_query_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_proto_query_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_proto_query_proto_goTypes = []any{
 	(Table)(0),                    // 0: opentelemetry.Table
 	(*FrontendQueryRequest)(nil),  // 1: opentelemetry.FrontendQueryRequest
 	(*FrontendQueryResponse)(nil), // 2: opentelemetry.FrontendQueryResponse
 }
-var file_query_proto_depIdxs = []int32{
+var file_proto_query_proto_depIdxs = []int32{
 	0, // 0: opentelemetry.FrontendQueryRequest.table:type_name -> opentelemetry.Table
 	1, // 1: opentelemetry.FrontendQueryService.Query:input_type -> opentelemetry.FrontendQueryRequest
 	2, // 2: opentelemetry.FrontendQueryService.Query:output_type -> opentelemetry.FrontendQueryResponse
@@ -218,27 +218,27 @@ var file_query_proto_depIdxs = []int32{
 	0, // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_query_proto_init() }
-func file_query_proto_init() {
-	if File_query_proto != nil {
+func init() { file_proto_query_proto_init() }
+func file_proto_query_proto_init() {
+	if File_proto_query_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_query_proto_rawDesc), len(file_query_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_query_proto_rawDesc), len(file_proto_query_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_query_proto_goTypes,
-		DependencyIndexes: file_query_proto_depIdxs,
-		EnumInfos:         file_query_proto_enumTypes,
-		MessageInfos:      file_query_proto_msgTypes,
+		GoTypes:           file_proto_query_proto_goTypes,
+		DependencyIndexes: file_proto_query_proto_depIdxs,
+		EnumInfos:         file_proto_query_proto_enumTypes,
+		MessageInfos:      file_proto_query_proto_msgTypes,
 	}.Build()
-	File_query_proto = out.File
-	file_query_proto_goTypes = nil
-	file_query_proto_depIdxs = nil
+	File_proto_query_proto = out.File
+	file_proto_query_proto_goTypes = nil
+	file_proto_query_proto_depIdxs = nil
 }

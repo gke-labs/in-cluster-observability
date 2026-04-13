@@ -38,7 +38,7 @@ message RegisterResponse {
 // QueryService is hosted on the sink and used by the query server to query it.
 service QueryService {
   // Query executes a query on the sink.
-  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc Query(QueryRequest) returns (stream QueryResponse);
 }
 
 message QueryRequest {
@@ -46,6 +46,6 @@ message QueryRequest {
 }
 
 message QueryResponse {
-  // Results are OTLP messages (e.g., ExportMetricsServiceRequest) marshaled to JSON.
-  repeated bytes results = 1;
+  // Result is an OTLP message (e.g., ExportMetricsServiceRequest) marshaled to binary proto.
+  bytes result = 1;
 }
