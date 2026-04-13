@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 )
@@ -139,8 +141,60 @@ func main() {
 		}
 	}()
 
-	// Start HTTP server for queries
+	// Start HTTP server for queries and OTLP collection
 	mux := http.NewServeMux()
+
+	handleOTLP := func(w http.ResponseWriter, r *http.Request, req proto.Message, resp proto.Message) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		contentType := r.Header.Get("Content-Type")
+		if contentType == "application/json" {
+			err = protojson.Unmarshal(body, req)
+		} else {
+			err = proto.Unmarshal(body, req)
+		}
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := writer.WriteObject(r.Context(), req); err != nil {
+			log.Printf("error writing object: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		accept := r.Header.Get("Accept")
+		var respBody []byte
+		if accept == "application/json" {
+			respBody, _ = protojson.Marshal(resp)
+			w.Header().Set("Content-Type", "application/json")
+		} else {
+			respBody, _ = proto.Marshal(resp)
+			w.Header().Set("Content-Type", "application/x-protobuf")
+		}
+		w.Write(respBody)
+	}
+
+	mux.HandleFunc("/v1/traces", func(w http.ResponseWriter, r *http.Request) {
+		handleOTLP(w, r, &coltracepb.ExportTraceServiceRequest{}, &coltracepb.ExportTraceServiceResponse{})
+	})
+	mux.HandleFunc("/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		handleOTLP(w, r, &colmetricspb.ExportMetricsServiceRequest{}, &colmetricspb.ExportMetricsServiceResponse{})
+	})
+	mux.HandleFunc("/v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		handleOTLP(w, r, &collogspb.ExportLogsServiceRequest{}, &collogspb.ExportLogsServiceResponse{})
+	})
+
 	mux.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

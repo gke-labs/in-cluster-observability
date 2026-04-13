@@ -71,7 +71,7 @@ spec:
         - containerPort: 4317
           name: otlp-grpc
         - containerPort: 4318
-          name: query-http
+          name: otlp-http
         volumeMounts:
         - name: varlog
           mountPath: /var/log
@@ -94,7 +94,7 @@ spec:
     name: otlp-grpc
   - port: 4318
     targetPort: 4318
-    name: query-http
+    name: otlp-http
 ---
 apiVersion: apps/v1
 kind: Deployment
