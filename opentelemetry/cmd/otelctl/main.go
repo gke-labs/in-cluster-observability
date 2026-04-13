@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -136,7 +137,7 @@ func main() {
 
 	client := pb.NewFrontendQueryServiceClient(conn)
 
-	resp, err := client.Query(context.Background(), &pb.FrontendQueryRequest{
+	stream, err := client.Query(context.Background(), &pb.FrontendQueryRequest{
 		Table:   table,
 		Filters: filters,
 	})
@@ -144,7 +145,16 @@ func main() {
 		log.Fatalf("Query failed: %v", err)
 	}
 
-	for _, result := range resp.Results {
-		fmt.Println(string(result))
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("Stream receive failed: %v", err)
+		}
+		for _, result := range resp.Results {
+			fmt.Println(string(result))
+		}
 	}
 }

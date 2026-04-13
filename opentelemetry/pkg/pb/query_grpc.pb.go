@@ -26,7 +26,7 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type FrontendQueryServiceClient interface {
-	Query(ctx context.Context, in *FrontendQueryRequest, opts ...grpc.CallOption) (*FrontendQueryResponse, error)
+	Query(ctx context.Context, in *FrontendQueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FrontendQueryResponse], error)
 }
 
 type frontendQueryServiceClient struct {
@@ -37,21 +37,30 @@ func NewFrontendQueryServiceClient(cc grpc.ClientConnInterface) FrontendQuerySer
 	return &frontendQueryServiceClient{cc}
 }
 
-func (c *frontendQueryServiceClient) Query(ctx context.Context, in *FrontendQueryRequest, opts ...grpc.CallOption) (*FrontendQueryResponse, error) {
+func (c *frontendQueryServiceClient) Query(ctx context.Context, in *FrontendQueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FrontendQueryResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(FrontendQueryResponse)
-	err := c.cc.Invoke(ctx, FrontendQueryService_Query_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &FrontendQueryService_ServiceDesc.Streams[0], FrontendQueryService_Query_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[FrontendQueryRequest, FrontendQueryResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FrontendQueryService_QueryClient = grpc.ServerStreamingClient[FrontendQueryResponse]
 
 // FrontendQueryServiceServer is the server API for FrontendQueryService service.
 // All implementations must embed UnimplementedFrontendQueryServiceServer
 // for forward compatibility.
 type FrontendQueryServiceServer interface {
-	Query(context.Context, *FrontendQueryRequest) (*FrontendQueryResponse, error)
+	Query(*FrontendQueryRequest, grpc.ServerStreamingServer[FrontendQueryResponse]) error
 	mustEmbedUnimplementedFrontendQueryServiceServer()
 }
 
@@ -62,8 +71,8 @@ type FrontendQueryServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedFrontendQueryServiceServer struct{}
 
-func (UnimplementedFrontendQueryServiceServer) Query(context.Context, *FrontendQueryRequest) (*FrontendQueryResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method Query not implemented")
+func (UnimplementedFrontendQueryServiceServer) Query(*FrontendQueryRequest, grpc.ServerStreamingServer[FrontendQueryResponse]) error {
+	return status.Error(codes.Unimplemented, "method Query not implemented")
 }
 func (UnimplementedFrontendQueryServiceServer) mustEmbedUnimplementedFrontendQueryServiceServer() {}
 func (UnimplementedFrontendQueryServiceServer) testEmbeddedByValue()                              {}
@@ -86,23 +95,16 @@ func RegisterFrontendQueryServiceServer(s grpc.ServiceRegistrar, srv FrontendQue
 	s.RegisterService(&FrontendQueryService_ServiceDesc, srv)
 }
 
-func _FrontendQueryService_Query_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(FrontendQueryRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _FrontendQueryService_Query_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(FrontendQueryRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(FrontendQueryServiceServer).Query(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: FrontendQueryService_Query_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FrontendQueryServiceServer).Query(ctx, req.(*FrontendQueryRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(FrontendQueryServiceServer).Query(m, &grpc.GenericServerStream[FrontendQueryRequest, FrontendQueryResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FrontendQueryService_QueryServer = grpc.ServerStreamingServer[FrontendQueryResponse]
 
 // FrontendQueryService_ServiceDesc is the grpc.ServiceDesc for FrontendQueryService service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -110,12 +112,13 @@ func _FrontendQueryService_Query_Handler(srv interface{}, ctx context.Context, d
 var FrontendQueryService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "opentelemetry.FrontendQueryService",
 	HandlerType: (*FrontendQueryServiceServer)(nil),
-	Methods: []grpc.MethodDesc{
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "Query",
-			Handler:    _FrontendQueryService_Query_Handler,
+			StreamName:    "Query",
+			Handler:       _FrontendQueryService_Query_Handler,
+			ServerStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "proto/query.proto",
 }
