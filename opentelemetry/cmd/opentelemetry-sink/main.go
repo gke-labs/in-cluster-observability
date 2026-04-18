@@ -334,7 +334,11 @@ func main() {
 
 	log.Printf("HTTP listening on %s", *httpAddr)
 	go func() {
-		if err := http.ListenAndServe(*httpAddr, mux); err != nil {
+		loggingMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("HTTP %s %s", r.Method, r.URL.Path)
+			mux.ServeHTTP(w, r)
+		})
+		if err := http.ListenAndServe(*httpAddr, loggingMux); err != nil {
 			log.Fatalf("failed to serve http: %v", err)
 		}
 	}()
