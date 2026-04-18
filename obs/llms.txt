@@ -1,0 +1,48 @@
+# obs - Observability Subproject
+
+`obs` is a library that simplifies open telemetry and logging in go. It provides a unified way to handle logging contexts and open telemetry spans.
+
+## Key Features
+
+It feels like `logr` and can be used to extract a logger from context:
+
+```go
+func Example(foo *Foo) {
+    log := obs.FromContext(ctx)
+    log.Info("hello world", "foo", foo)
+    // ...
+}
+```
+
+It supports creating spans that act as logging contexts:
+
+```go
+func Example(ctx context.Context, foo *Foo) {
+    ctx, span := obs.Start(ctx, "roll")
+    defer span.End()
+    span.Info("hello world", "foo", foo)
+}
+```
+
+Attributes can be added to the span easily. These attributes are added both to the open telemetry span and as values to the logger:
+
+```go
+func Example(ctx context.Context, foo *Foo) {
+    ctx, span := obs.Start(ctx, "roll", obs.String("user.name", foo.UserName()))
+    defer span.End()
+    span.Info("hello world", "foo", foo)
+}
+```
+
+You can also use custom strongly-typed helpers to create attributes:
+
+```go
+// Example helper:
+// func Foo(f *Foo) obs.Attribute { return obs.String("foo", f.ID) }
+
+func Example(ctx context.Context, foo *Foo) {
+    ctx, log := obs.Start(ctx, "roll", Foo(foo))
+    defer log.End()
+    log.Info("hello world") // No reason to include foo here, it's already in the scope.
+}
+```
