@@ -1,3 +1,7 @@
+# **NOTE**
+> [!CAUTION]
+> ***This is the original prototype before we started a major refactor***
+
 # In-Cluster Observability
 
 This project aims to provide lightweight, in-cluster observability for Kubernetes clusters. The primary goal is to explore whether a lightweight monitoring stack, running directly on Kubernetes nodes, can provide enough signal for effective autoscaling and traffic management.
