@@ -74,8 +74,14 @@ type Discovery struct {
 // Instrument is one OBI discovery selector — a process matcher. OBI
 // resolves all configured selectors and instruments any process that
 // matches at least one. An entry must specify at least one selector
-// (OpenPorts, TargetPIDs, ExePath, or similar) or OBI rejects the
-// config at startup.
+// (OpenPorts, TargetPIDs, ExePath, K8sPodName, etc.) or OBI rejects
+// the config at startup.
+//
+// The K8s metadata fields (K8sPodName / K8sNamespace / ...) match
+// against the attributes OBI's own informer attaches per ADR-0021.
+// Multiple K8s fields combine as AND; specify just enough to
+// uniquely identify the target. The fields are inlined at the top
+// of the entry per OBI v0.9's MetadataGlobMap shape.
 type Instrument struct {
 	Name      string `yaml:"name,omitempty"`
 	Namespace string `yaml:"namespace,omitempty"`
@@ -84,11 +90,21 @@ type Instrument struct {
 	// YAML sequence of ints; we emit the string form for compactness.
 	OpenPorts string `yaml:"open_ports,omitempty"`
 	// TargetPIDs is OBI's `target_pids` selector — an explicit list
-	// of process IDs to instrument. Populated by AllowPID-driven
-	// entries (each entry typically targets a single PID).
+	// of process IDs to instrument. Synthesizing PIDs the host
+	// doesn't have produces dead entries; prefer the K8s metadata
+	// selectors below for controller-driven scoping.
 	TargetPIDs []uint32 `yaml:"target_pids,omitempty"`
 	// ExePath is a glob over the process executable path.
 	ExePath string `yaml:"exe_path,omitempty"`
+
+	// K8s metadata selectors. Match against the attributes OBI's
+	// own informer attaches. Pod name + namespace is sufficient to
+	// uniquely identify a workload at a point in time; the others
+	// are available for broader (workload-shape) matching.
+	K8sPodName        string `yaml:"k8s_pod_name,omitempty"`
+	K8sNamespace      string `yaml:"k8s_namespace,omitempty"`
+	K8sDeploymentName string `yaml:"k8s_deployment_name,omitempty"`
+	K8sContainerName  string `yaml:"k8s_container_name,omitempty"`
 }
 
 // DefaultFile returns a baseline File with the loopback OTLP endpoints

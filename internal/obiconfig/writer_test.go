@@ -134,6 +134,40 @@ func TestWriter_DiscoveryInstrumentShape(t *testing.T) {
 	}
 }
 
+func TestWriter_K8sMetadataInstrument(t *testing.T) {
+	// Verifies the v0.4 controller-driven path's K8s metadata
+	// selectors land inlined at the top of the Instrument entry
+	// (OBI's MetadataGlobMap is `yaml:",inline"`), not nested under
+	// some `metadata:` sub-key.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	w, _ := obiconfig.NewWriter(path)
+
+	f := obiconfig.DefaultFile("http://127.0.0.1:4318")
+	f.Discovery.Instrument = []obiconfig.Instrument{{
+		Name:         "pod-abc123",
+		K8sPodName:   "nginx-567b68cc5f-6mggl",
+		K8sNamespace: "demo",
+		OpenPorts:    "80",
+	}}
+	if _, err := w.Write(f); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	content := string(got)
+	if !strings.Contains(content, "k8s_pod_name: nginx-567b68cc5f-6mggl") {
+		t.Errorf("expected `k8s_pod_name:` at top of entry; got:\n%s", content)
+	}
+	if !strings.Contains(content, "k8s_namespace: demo") {
+		t.Errorf("expected `k8s_namespace:` at top of entry; got:\n%s", content)
+	}
+	// Make sure they're NOT nested under a `metadata:` subkey (a
+	// past bug shape we want a regression guard for).
+	if strings.Contains(content, "metadata:") {
+		t.Errorf("k8s_* keys should be inline, not under a metadata: subkey; got:\n%s", content)
+	}
+}
+
 func TestWriter_FileIsWorldReadable(t *testing.T) {
 	// The OBI sibling container reads this file as a different uid
 	// than the agent container; world-readable (0644) avoids the
