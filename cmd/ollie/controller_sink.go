@@ -16,7 +16,6 @@ package main
 
 import (
 	"context"
-	"sync"
 
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
 	"github.com/gke-labs/in-cluster-observability/pkg/controller/agentclient"
@@ -25,53 +24,48 @@ import (
 
 // captureSink implements agentclient.Sink. It receives MonitoringSpec
 // UPSERT / REMOVE deltas from the controller's gRPC stream and turns
-// them into AllowPID / BlockPID calls on the capture.Manager — which
-// in turn rewrites OBI's discovery.instrument config and triggers an
+// them into AllowPod / BlockPod calls on the capture.Manager — which
+// in turn rewrites OBI's discovery.instrument config (one entry per
+// pod, matching by `k8s_pod_name` + `k8s_namespace`) and triggers an
 // OBI reload via the existing v0.2 coalescer.
 //
-// v0.4 simplification: the controller doesn't yet supply PID hints,
-// so we synthesize a deterministic "pseudo-PID" per pod UID (top of
-// the uint32 space). This lets the existing AllowPID-keyed flow
-// stand up end-to-end while real PID resolution lands as agent-side
-// work in a later milestone. The OBI side ends up with one
-// discovery.instrument entry per allow-listed pod-UID; OBI's
-// open_ports + exe_path matching does the actual process selection.
+// The K8s-metadata match relies on OBI's own informer attaching
+// k8s.pod.name / k8s.namespace.name to candidate processes per
+// ADR-0021 — there's no PID resolution on the agent side, no
+// /proc/<pid>/cgroup parsing, no Kubelet round-trip. The earlier
+// pseudo-PID approach (allocate a synthetic uint32 per pod) produced
+// dead OBI entries because OBI looked for processes with PIDs the
+// host didn't have; the K8s-metadata path lets OBI's discovery loop
+// decide which processes belong to which pod.
 //
-// The protocols bitset on MonitoringSpec is unused in v0.4 — the
-// agent's existing --obi-instrument-ports seed already covers the
-// L4 + HTTP/1.1 protocols v0.4 ships, and per-protocol toggles
-// arrive with v0.6's richer Module surface.
+// The protocols bitset on MonitoringSpec is currently advisory —
+// OBI's module gating happens at sidecar startup via
+// OTEL_EBPF_METRICS_FEATURES; per-pod per-module gating arrives with
+// v0.6's richer Module surface.
 type captureSink struct {
 	mgr capture.Manager
-
-	mu       sync.Mutex
-	podToPID map[string]uint32 // pod_uid → synthetic PID
-	nextPID  uint32
 }
 
 func newCaptureSink(mgr capture.Manager) *captureSink {
-	return &captureSink{
-		mgr:      mgr,
-		podToPID: map[string]uint32{},
-		// Start at 1<<31 — far above any real PID. v0.4 OBI uses
-		// the PID as a selector key; collisions with real PIDs
-		// would be a problem if the controller-driven path
-		// instrumented the same process twice. The high half-space
-		// gives ~2B unique pseudo-PIDs.
-		nextPID: 1 << 31,
-	}
+	return &captureSink{mgr: mgr}
 }
 
 func (s *captureSink) OnUpsert(_ context.Context, spec *cppb.MonitoringSpec) error {
-	s.mu.Lock()
-	pid, ok := s.podToPID[spec.GetPodUid()]
-	if !ok {
-		pid = s.nextPID
-		s.nextPID++
-		s.podToPID[spec.GetPodUid()] = pid
+	httpPorts := make([]uint16, 0, len(spec.GetHttpPorts()))
+	for _, p := range spec.GetHttpPorts() {
+		// HttpPorts on the wire is uint32 (proto3 has no uint16); narrow
+		// here. Ports above 65535 are nonsense and would clamp via the
+		// uint16 cast — defend against that by skipping out-of-range
+		// entries.
+		if p == 0 || p > 65535 {
+			continue
+		}
+		httpPorts = append(httpPorts, uint16(p))
 	}
-	s.mu.Unlock()
-	return s.mgr.AllowPID(pid, capture.PIDSpec{
+	return s.mgr.AllowPod(spec.GetPodUid(), capture.PodSpec{
+		PodName:   spec.GetPodName(),
+		Namespace: spec.GetNamespace(),
+		HTTPPorts: httpPorts,
 		Labels: map[string]string{
 			"k8s.pod.uid":        spec.GetPodUid(),
 			"k8s.pod.name":       spec.GetPodName(),
@@ -82,16 +76,7 @@ func (s *captureSink) OnUpsert(_ context.Context, spec *cppb.MonitoringSpec) err
 }
 
 func (s *captureSink) OnRemove(_ context.Context, podUID string) error {
-	s.mu.Lock()
-	pid, ok := s.podToPID[podUID]
-	if ok {
-		delete(s.podToPID, podUID)
-	}
-	s.mu.Unlock()
-	if !ok {
-		return nil
-	}
-	return s.mgr.BlockPID(pid)
+	return s.mgr.BlockPod(podUID)
 }
 
 // runControllerClient is called from cmd/ollie's main when
