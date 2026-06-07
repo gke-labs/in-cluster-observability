@@ -17,6 +17,9 @@ package capture
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,6 +85,7 @@ func NewBridge(cfg Config) (Manager, error) {
 		events:         make(chan Event, cfg.EventBuffer),
 		modules:        map[Module]struct{}{},
 		pids:           map[uint32]PIDSpec{},
+		pods:           map[string]PodSpec{},
 		metrics:        m,
 		dirty:          make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
@@ -112,6 +116,7 @@ type bridgeManager struct {
 	stopped   bool
 	modules   map[Module]struct{}
 	pids      map[uint32]PIDSpec
+	pods      map[string]PodSpec
 	enrichers []Enricher
 
 	writer   *obiconfig.Writer
@@ -229,6 +234,35 @@ func (b *bridgeManager) BlockPID(pid uint32) error {
 	return nil
 }
 
+// AllowPod adds (or updates) a per-pod monitoring spec. Each AllowPod
+// entry produces one obiconfig.Instrument with k8s_pod_name +
+// k8s_namespace matchers — OBI's own informer attaches those
+// attributes to candidate processes and the match runs against them.
+// No PID resolution on the agent side.
+func (b *bridgeManager) AllowPod(uid string, spec PodSpec) error {
+	if uid == "" {
+		return fmt.Errorf("capture: AllowPod requires a non-empty pod UID")
+	}
+	b.mu.Lock()
+	b.pods[uid] = spec
+	b.mu.Unlock()
+	b.triggerReload()
+	return nil
+}
+
+// BlockPod removes a per-pod spec. Idempotent.
+func (b *bridgeManager) BlockPod(uid string) error {
+	b.mu.Lock()
+	if _, existed := b.pods[uid]; existed {
+		delete(b.pods, uid)
+		b.mu.Unlock()
+		b.triggerReload()
+		return nil
+	}
+	b.mu.Unlock()
+	return nil
+}
+
 // EnableModule adds the module to the active set and triggers a reload.
 // Idempotent.
 func (b *bridgeManager) EnableModule(m Module, _ ModuleConfig) error {
@@ -335,15 +369,18 @@ func (b *bridgeManager) writeReload() {
 }
 
 // buildConfig derives an OBI config from the current bridgeManager
-// state. For each tracked PID one Instrument entry is emitted with
-// the PID set as OBI's `target_pids` selector. v0.3 has no port info
-// in the spec; controllers populate this in v0.4.
+// state. Each tracked PID becomes one Instrument with `target_pids`;
+// each tracked pod (the v0.4 controller-driven path) becomes one
+// Instrument with `k8s_pod_name` + `k8s_namespace` matchers. The
+// smoke-port seed is added only when both sets are empty so the
+// agent has something for OBI to attach to before any controller
+// or operator drives discovery.
 func (b *bridgeManager) buildConfig() obiconfig.File {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	file := obiconfig.DefaultFile(b.cfg.OBIEndpoint)
-	if len(b.pids) == 0 {
+	if len(b.pids) == 0 && len(b.pods) == 0 {
 		if b.cfg.InitialOpenPorts != "" {
 			file.Discovery.Instrument = []obiconfig.Instrument{{
 				Name:      "smoke",
@@ -352,12 +389,29 @@ func (b *bridgeManager) buildConfig() obiconfig.File {
 		}
 		return file
 	}
-	entries := make([]obiconfig.Instrument, 0, len(b.pids))
+	entries := make([]obiconfig.Instrument, 0, len(b.pids)+len(b.pods))
 	for pid, spec := range b.pids {
 		entries = append(entries, obiconfig.Instrument{
 			Name:       fmt.Sprintf("pid-%d", pid),
 			TargetPIDs: []uint32{pid},
 			OpenPorts:  portsFromSpec(spec),
+		})
+	}
+	// Sort pod UIDs so the emitted YAML is deterministic across
+	// reconciles; the writer short-circuits unchanged content via
+	// byte equality.
+	uids := make([]string, 0, len(b.pods))
+	for uid := range b.pods {
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	for _, uid := range uids {
+		spec := b.pods[uid]
+		entries = append(entries, obiconfig.Instrument{
+			Name:         "pod-" + shortUID(uid),
+			K8sPodName:   spec.PodName,
+			K8sNamespace: spec.Namespace,
+			OpenPorts:    portsFromPodSpec(spec),
 		})
 	}
 	file.Discovery.Instrument = entries
@@ -366,8 +420,37 @@ func (b *bridgeManager) buildConfig() obiconfig.File {
 
 // portsFromSpec extracts open_ports from a PIDSpec as OBI's
 // comma-separated string format. v0.2/v0.3 have no port info in the
-// spec; controllers populate this in v0.4. Returns "" for now.
+// spec; controllers populate this in v0.4 via PodSpec. Returns "" for
+// now.
 func portsFromSpec(_ PIDSpec) string { return "" }
+
+// portsFromPodSpec joins PodSpec.HTTPPorts into OBI's IntEnum string
+// form ("80" / "80,8080" / "8000-8999"). v0.4 emits the comma-list
+// form; ranges arrive when CR cardinality controls land in v0.6.
+// Empty PodSpec.HTTPPorts produces "" — the entry still matches
+// pods by K8s metadata (L4 socket filter captures TCP regardless of
+// per-pod L7 attach).
+func portsFromPodSpec(spec PodSpec) string {
+	if len(spec.HTTPPorts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(spec.HTTPPorts))
+	for _, p := range spec.HTTPPorts {
+		parts = append(parts, strconv.FormatUint(uint64(p), 10))
+	}
+	return strings.Join(parts, ",")
+}
+
+// shortUID returns the first 12 characters of a K8s UID — enough to
+// be unique within a single agent's tracked pod set and short enough
+// to keep the OBI Instrument name human-scannable in the rendered
+// config file. Falls through to the raw UID if it's already short.
+func shortUID(uid string) string {
+	if len(uid) <= 12 {
+		return uid
+	}
+	return uid[:12]
+}
 
 // bridgeHandler implements otlpreceiver.Handler. v0.2 forwards each
 // payload to the translator (#72, #73). For #70 the handler just

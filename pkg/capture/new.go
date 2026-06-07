@@ -93,6 +93,13 @@ func (m *noopManager) BlockPID(pid uint32) error {
 	return nil
 }
 
+// AllowPod / BlockPod are no-ops on the noopManager — its purpose is
+// to satisfy the Manager interface without doing real work, so we
+// don't bother tracking the pod set.
+func (m *noopManager) AllowPod(_ string, _ PodSpec) error { return nil }
+
+func (m *noopManager) BlockPod(_ string) error { return nil }
+
 func (m *noopManager) EnableModule(mod Module, _ ModuleConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

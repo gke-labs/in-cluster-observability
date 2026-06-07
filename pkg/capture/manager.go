@@ -39,6 +39,12 @@ import (
 //   - Start: load eBPF programs, attach probes, begin reading events.
 //   - Stop: detach, close the Events() channel, release resources.
 //   - AllowPID/BlockPID: idempotent per-PID enable/disable.
+//     Used by the loopback debug endpoint and by tests; pass a
+//     real process PID.
+//   - AllowPod/BlockPod: idempotent per-pod enable/disable. Used
+//     by the v0.4 controller-driven path — the agent writes K8s
+//     metadata selectors that OBI matches against its own
+//     informer-attached attributes, no PID resolution needed.
 //   - EnableModule/DisableModule: idempotent per-protocol enable.
 //   - Events: a buffered channel of translated capture events. Closed
 //     on Stop. Readers must drain.
@@ -53,6 +59,9 @@ type Manager interface {
 
 	AllowPID(pid uint32, spec PIDSpec) error
 	BlockPID(pid uint32) error
+
+	AllowPod(uid string, spec PodSpec) error
+	BlockPod(uid string) error
 
 	EnableModule(m Module, cfg ModuleConfig) error
 	DisableModule(m Module) error
@@ -131,8 +140,10 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// PIDSpec is what the controller's MonitoringSpec resolves to on a
-// per-PID basis. Passed to AllowPID.
+// PIDSpec is the per-PID enable record passed to AllowPID. Used by
+// the loopback debug endpoint and by tests; the v0.4 controller path
+// uses PodSpec instead so OBI's informer-attached attributes drive
+// the match.
 //
 // Stability: Experimental
 type PIDSpec struct {
@@ -143,6 +154,39 @@ type PIDSpec struct {
 	Sampling Sampling
 	// Labels are additional attributes the enricher attaches to events
 	// produced for this PID.
+	Labels map[string]string
+}
+
+// PodSpec is the per-pod enable record passed to AllowPod. The
+// controller hands the agent one PodSpec per matched pod; the agent
+// translates each into an obiconfig.Instrument entry whose K8s
+// metadata selectors (k8s_pod_name + k8s_namespace) match the
+// attributes OBI's K8s informer attaches per ADR-0021. This sidesteps
+// PID resolution entirely — the agent never needs to know which host
+// PID corresponds to which pod.
+//
+// Stability: Experimental
+type PodSpec struct {
+	// PodName is the pod's metadata.name. Required.
+	PodName string
+	// Namespace is the pod's metadata.namespace. Required.
+	Namespace string
+	// HTTPPorts is the set of listening ports OBI should attach L7
+	// uprobes for (matches OBI's open_ports selector). Empty means
+	// "no L7 ports configured"; combined with OBI's K8s-metadata
+	// match, this still produces an instrument entry but it'll only
+	// surface L4 flows (which OBI's socket filter captures
+	// regardless of discovery).
+	HTTPPorts []uint16
+	// Protocols is the set of capture modules to enable for this pod.
+	// Currently advisory — OBI's module gating is via
+	// OTEL_EBPF_METRICS_FEATURES at sidecar startup; per-pod
+	// per-module gating arrives with v0.6's richer Module surface.
+	Protocols []Module
+	// Labels are additional attributes the enricher attaches to
+	// events produced for this pod. Inert in v0.4 (OBI's informer
+	// already attaches K8s labels); reserved for v0.5+ when the
+	// in-cluster store cares about per-CR-supplied tags.
 	Labels map[string]string
 }
 
