@@ -123,6 +123,17 @@ type bridgeManager struct {
 	receiver *otlpreceiver.Server
 	events   chan Event
 
+	// emitWG counts in-flight emitters (OTLP handlers, degraded-event
+	// reporters). Stop waits for it before closing events, so a send
+	// on a closed channel is impossible even when the receiver's
+	// graceful shutdown is cut short by an expired context (#154).
+	emitWG sync.WaitGroup
+
+	// lastRestartCount remembers the highest OBI restart count seen by
+	// ReportOBIRestart so the counter advances by the delta, not by one
+	// per call (#154).
+	lastRestartCount int64
+
 	// reload coalescer infrastructure (per obi-integration.md §5):
 	// non-blocking triggerReload posts to dirty; coalescerLoop consumes
 	// dirty events with a debounce window before writing the OBI config.
@@ -135,8 +146,10 @@ type bridgeManager struct {
 }
 
 // Start binds the OTLP receivers (if addresses are configured) and
-// writes the initial OBI config (if a path is configured). Returns an
-// error if any step fails; partial-startup teardown is best-effort.
+// writes the initial OBI config (if a path is configured). On failure
+// every partially-started component is torn down and coalDone is
+// resolved, so a subsequent Stop returns promptly instead of blocking
+// on a coalescer that never launched (#154).
 func (b *bridgeManager) Start(ctx context.Context) error {
 	b.mu.Lock()
 	if b.stopped {
@@ -151,31 +164,37 @@ func (b *bridgeManager) Start(ctx context.Context) error {
 	b.mu.Unlock()
 
 	// OTLP receiver — only bind if at least one address is configured.
+	var recv *otlpreceiver.Server
 	if b.cfg.OTLPGRPCAddr != "" || b.cfg.OTLPHTTPAddr != "" {
-		recv, err := otlpreceiver.New(otlpreceiver.Config{
+		r, err := otlpreceiver.New(otlpreceiver.Config{
 			GRPCAddr: b.cfg.OTLPGRPCAddr,
 			HTTPAddr: b.cfg.OTLPHTTPAddr,
 			Handler:  &bridgeHandler{b: b},
 		})
 		if err != nil {
+			close(b.coalDone)
 			return fmt.Errorf("capture: receiver new: %w", err)
 		}
-		if err := recv.Start(ctx); err != nil {
+		if err := r.Start(ctx); err != nil {
+			close(b.coalDone)
 			return fmt.Errorf("capture: receiver start: %w", err)
 		}
+		recv = r
+		b.mu.Lock()
 		b.receiver = recv
+		b.mu.Unlock()
 	}
 
 	// Initial OBI config — empty discovery list; modules are off until
 	// EnableModule is called.
 	if b.writer != nil {
 		if _, err := b.writer.Write(b.buildConfig()); err != nil {
+			if recv != nil {
+				_ = recv.Stop(ctx)
+			}
+			close(b.coalDone)
 			return fmt.Errorf("capture: initial obi config: %w", err)
 		}
-	}
-
-	// Reload coalescer — only run if a writer is configured.
-	if b.writer != nil {
 		go b.coalescerLoop()
 	} else {
 		close(b.coalDone)
@@ -184,6 +203,11 @@ func (b *bridgeManager) Start(ctx context.Context) error {
 }
 
 // Stop drains the receiver and closes the Events channel. Idempotent.
+// Safe after a failed Start (coalDone is resolved on every Start exit
+// path), and safe against in-flight OTLP handlers: emitWG is drained
+// before the events channel closes, so a handler that outlives the
+// receiver's graceful shutdown (expired ctx) can never send on a
+// closed channel (#154).
 func (b *bridgeManager) Stop(ctx context.Context) error {
 	b.mu.Lock()
 	if b.stopped {
@@ -196,15 +220,31 @@ func (b *bridgeManager) Stop(ctx context.Context) error {
 	b.mu.Unlock()
 
 	close(b.stopCh)
-	if started && b.writer != nil {
+	if started {
 		<-b.coalDone
 	}
 	if recv != nil {
 		_ = recv.Stop(ctx)
 	}
+	b.emitWG.Wait()
 	close(b.events)
 	return nil
 }
+
+// beginEmit registers an in-flight emitter. It returns false once Stop
+// has begun — callers must then drop their events instead of sending.
+// Every true return must be paired with endEmit.
+func (b *bridgeManager) beginEmit() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopped {
+		return false
+	}
+	b.emitWG.Add(1)
+	return true
+}
+
+func (b *bridgeManager) endEmit() { b.emitWG.Done() }
 
 // AllowPID adds (or updates) a per-PID monitoring spec. The discovery
 // section of OBI's config is derived from the current pid set; a
@@ -460,6 +500,10 @@ type bridgeHandler struct {
 }
 
 func (h *bridgeHandler) OnMetrics(ctx context.Context, req *collmetricspb.ExportMetricsServiceRequest) error {
+	if !h.b.beginEmit() {
+		return nil // shutting down; drop
+	}
+	defer h.b.endEmit()
 	defer h.b.recoverPanic("receiver_metrics", ModuleL4TCP)
 	for _, ev := range TranslateMetrics(req.GetResourceMetrics()) {
 		h.emit(ctx, ev)
@@ -468,6 +512,10 @@ func (h *bridgeHandler) OnMetrics(ctx context.Context, req *collmetricspb.Export
 }
 
 func (h *bridgeHandler) OnTraces(ctx context.Context, req *colltracepb.ExportTraceServiceRequest) error {
+	if !h.b.beginEmit() {
+		return nil // shutting down; drop
+	}
+	defer h.b.endEmit()
 	defer h.b.recoverPanic("receiver_traces", ModuleHTTP1)
 	for _, ev := range TranslateTraces(req.GetResourceSpans()) {
 		h.emit(ctx, ev)
@@ -476,6 +524,10 @@ func (h *bridgeHandler) OnTraces(ctx context.Context, req *colltracepb.ExportTra
 }
 
 func (h *bridgeHandler) OnLogs(ctx context.Context, _ *colllogspb.ExportLogsServiceRequest) error {
+	if !h.b.beginEmit() {
+		return nil // shutting down; drop
+	}
+	defer h.b.endEmit()
 	defer h.b.recoverPanic("receiver_logs", ModuleL4TCP)
 	// Logs not used in v0.2; drop silently.
 	return nil

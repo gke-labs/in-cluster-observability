@@ -71,28 +71,39 @@ func (b *bridgeManager) markDegraded(ctx context.Context, mod Module, reason str
 	_ = reason // reason is currently surfaced only via the structured log.
 }
 
-// ReportOBIRestart increments the obi_restarts_total counter and, if
-// the supplied restart-count crosses degradedThreshold, emits a
-// ModuleDegraded event covering every currently-enabled module. The
-// agent does not poll for restarts itself in v0.2 — operators or a
-// future controller (#77 v0.3 follow-up) call this method when they
-// detect OBI's container restart count has increased.
+// ReportOBIRestart advances the obi_restarts_total counter by the
+// delta between the supplied cumulative restart count and the highest
+// count previously reported (so repeated reports of the same count
+// don't inflate the metric — #154), and, if the count crosses
+// degradedThreshold, emits a ModuleDegraded event covering every
+// currently-enabled module. The agent does not poll for restarts
+// itself in v0.2 — operators or a future controller (#77 v0.3
+// follow-up) call this method when they detect OBI's container
+// restart count has increased. No-op after Stop.
 //
 // Stability: Experimental
 func (b *bridgeManager) ReportOBIRestart(ctx context.Context, restartCount int64) {
-	b.metrics.ObiRestartsTotal.Add(ctx, 1)
-	const degradedThreshold = 3
-	if restartCount < degradedThreshold {
-		return
+	if !b.beginEmit() {
+		return // stopped; drop
 	}
+	defer b.endEmit()
+
 	b.mu.Lock()
+	delta := restartCount - b.lastRestartCount
+	if delta > 0 {
+		b.lastRestartCount = restartCount
+	}
 	mods := make([]Module, 0, len(b.modules))
 	for m := range b.modules {
 		mods = append(mods, m)
 	}
 	b.mu.Unlock()
-	if len(mods) == 0 {
-		// No modules enabled — degrade nothing.
+
+	if delta > 0 {
+		b.metrics.ObiRestartsTotal.Add(ctx, delta)
+	}
+	const degradedThreshold = 3
+	if restartCount < degradedThreshold || len(mods) == 0 {
 		return
 	}
 	for _, m := range mods {
