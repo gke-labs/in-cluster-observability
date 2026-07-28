@@ -75,6 +75,7 @@ The principle: ship a focused v1 that hits requirements §1–§7 cleanly, then 
 - Single-page app embedded in the query server, served at `/ui/`.
 - Built on the existing gRPC streaming + PromQL/CEL APIs — no new server surface.
 - Focus: topology graph (services & edges), per-edge drill-down (latency histograms, error rates), recent spans with filtering. Not a Grafana competitor for time-series.
+- For the span-detail waterfall, start from the POC-era sketch in [#54](https://github.com/gke-labs/in-cluster-observability/issues/54) (closed as premature, 2026-07-28): virtualized list of absolutely-positioned divs, plain JS first, no canvas/SVG.
 
 **Open questions.**
 1. Tech stack — React + d3 for the graph is the obvious answer. Worth a brief survey.
