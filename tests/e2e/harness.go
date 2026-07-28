@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -222,6 +223,138 @@ func (h *Harness) DumpDiagnostics() {
 		}
 		h.saveArtifact(name, out)
 	}
+}
+
+// ApplyStdin feeds a manifest to kubectl apply -f - on the harness's
+// pinned context.
+func (h *Harness) ApplyStdin(manifest string) {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "--context", h.context(), "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Fatalf("kubectl apply manifest from stdin: %v\n%s", err, out)
+	}
+}
+
+// GitRoot returns the repository root.
+func GitRoot(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatalf("finding repo root: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// obiImageRe extracts the pinned OBI image tag from k8s/daemonset.yaml
+// so tests never hardcode a tag the #152-style bump PRs would have to
+// chase.
+var obiImageRe = regexp.MustCompile(`image:\s*(otel/ebpf-instrument:\S+)`)
+
+// PinnedOBIImage returns the OBI image pinned in k8s/daemonset.yaml.
+func PinnedOBIImage(t *testing.T, repoRoot string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repoRoot, "k8s/daemonset.yaml"))
+	if err != nil {
+		t.Fatalf("reading daemonset manifest: %v", err)
+	}
+	m := obiImageRe.FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("no otel/ebpf-instrument image pin found in k8s/daemonset.yaml")
+	}
+	return string(m[1])
+}
+
+// AgnhostImage is the test workload image. registry.k8s.io, so cluster
+// pulls never depend on Docker Hub rate limits.
+const AgnhostImage = "registry.k8s.io/e2e-test-images/agnhost:2.53"
+
+// TestWorkloadManifest returns an HTTP echo server on 8080 (a port in
+// the DaemonSet's --obi-instrument-ports seed list) plus a client
+// deployment that loops requests through the Service so traffic
+// crosses the pod network.
+func TestWorkloadManifest() string {
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: echo}
+  template:
+    metadata:
+      labels: {app: echo}
+    spec:
+      containers:
+        - name: echo
+          image: %[1]s
+          imagePullPolicy: Never
+          args: ["netexec", "--http-port=8080"]
+          ports: [{containerPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: default
+spec:
+  selector: {app: echo}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-client
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: traffic-client}
+  template:
+    metadata:
+      labels: {app: traffic-client}
+    spec:
+      containers:
+        - name: client
+          image: %[1]s
+          imagePullPolicy: Never
+          command: ["/bin/sh", "-c"]
+          args:
+            - while true; do wget -q -O /dev/null http://echo.default.svc:8080/hostname || true; sleep 0.2; done
+`, AgnhostImage)
+}
+
+// InstallOllie builds + loads the ollie images, installs k8s/ via
+// kustomize, points the workloads at the freshly-loaded e2e tags, and
+// waits for rollout. Shared by the e2e smoke test and the contract
+// fixture recorder.
+func (h *Harness) InstallOllie(repoRoot string) {
+	h.t.Helper()
+	h.DockerBuild("ollie:e2e", filepath.Join(repoRoot, "images/ollie/Dockerfile"), repoRoot)
+	h.KindLoad("ollie:e2e")
+	h.DockerBuild("ollie-controller:e2e", filepath.Join(repoRoot, "images/ollie-controller/Dockerfile"), repoRoot)
+	h.KindLoad("ollie-controller:e2e")
+	h.PullAndLoad(PinnedOBIImage(h.t, repoRoot))
+
+	h.Kubectl("apply", "-k", filepath.Join(repoRoot, "k8s"))
+	h.Kubectl("patch", "daemonset", "ollie-agent", "-n", "ollie-system", "--type=strategic",
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"agent","image":"ollie:e2e","imagePullPolicy":"Never"}]}}}}`)
+	h.Kubectl("patch", "deployment", "ollie-controller", "-n", "ollie-system", "--type=strategic",
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"controller","image":"ollie-controller:e2e","imagePullPolicy":"Never"}]}}}}`)
+	h.WaitRollout("daemonset", "ollie-agent", "ollie-system", 5*time.Minute)
+	h.WaitRollout("deployment", "ollie-controller", "ollie-system", 3*time.Minute)
+}
+
+// DeployTestWorkload loads the agnhost image and starts the echo
+// server + traffic client.
+func (h *Harness) DeployTestWorkload() {
+	h.t.Helper()
+	h.PullAndLoad(AgnhostImage)
+	h.ApplyStdin(TestWorkloadManifest())
+	h.WaitRollout("deployment", "echo", "default", 2*time.Minute)
+	h.WaitRollout("deployment", "traffic-client", "default", 2*time.Minute)
 }
 
 // saveArtifact writes content under $ARTIFACTS (the path CI uploads) or
