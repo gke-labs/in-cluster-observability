@@ -15,6 +15,7 @@
 package obi
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -39,6 +40,10 @@ func TestTranslationContract(t *testing.T) {
 		t.Skip("no fixtures in testdata/translation; run with -seed -update to bootstrap")
 	}
 	for _, dir := range cases {
+		// Skip non-directories (e.g. RECORDED.md provenance, #151).
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			continue
+		}
 		name := filepath.Base(dir)
 		t.Run(name, func(t *testing.T) {
 			runTranslationCase(t, dir)
