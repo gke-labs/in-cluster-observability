@@ -59,6 +59,7 @@ func main() {
 	otlpHTTP := flag.String("otlp-http-addr", "127.0.0.1:4318", "loopback bind address for OTLP HTTP receiver")
 	obiConfig := flag.String("obi-config", "/etc/ollie/obi-config/config.yaml", "shared-volume path where the agent writes OBI's config (empty disables writing)")
 	obiInstrumentPorts := flag.String("obi-instrument-ports", "", "seed OBI's discovery.instrument with one entry matching processes on these listening ports (OBI format: \"80\", \"80,8080\", \"8000-8999\"). v0.3 L7 smoke-test knob; harmless once the v0.4 controller pushes per-PID MonitoringSpecs.")
+	obiExportEndpoint := flag.String("obi-export-endpoint", "", "override the OTLP endpoint the agent writes into OBI's config (otel_{metrics,traces}_export). Empty derives the loopback receiver (http://<otlp-http-addr>) — the production shape. Non-loopback values bypass this agent entirely; used by the contract-fixture recorder (tests/contract/obi, #151) and for debugging OBI's raw stream.")
 	scrapeAddr := flag.String("scrape-addr", "0.0.0.0:9090", "bind address for the production Prometheus scrape endpoint at /metrics (empty disables). Per ADR-0021 this is the single scrape URL — exposes both agent self-obs and re-emitted OBI metrics.")
 	scrapeAuth := flag.String("scrape-auth", "auto", "authn/authz for the scrape endpoint (#145): 'token' requires a bearer token, validated via TokenReview + SubjectAccessReview for `get` on nonResourceURL /metrics (grant via the ollie-metrics-reader ClusterRole; fail-closed); 'none' disables auth; 'auto' picks token when running in-cluster, none otherwise. Loopback requests are always exempt (pod-internal debugging).")
 	scrapeAuthAudiences := flag.String("scrape-auth-audiences", "", "comma-separated token audiences required by --scrape-auth=token (projected-token binding). Empty accepts standard API-server-audience tokens — required for managed collectors (GMP), which can't mint custom audiences.")
@@ -111,6 +112,7 @@ func main() {
 	captureCfg := capture.Config{
 		OTLPGRPCAddr:     *otlpGRPC,
 		OTLPHTTPAddr:     *otlpHTTP,
+		OBIEndpoint:      *obiExportEndpoint,
 		ObiConfigPath:    *obiConfig,
 		InitialOpenPorts: *obiInstrumentPorts,
 		MeterProvider:    mp,
