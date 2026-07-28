@@ -27,7 +27,7 @@ What's in the repo:
 - `cmd/ollie/` — agent binary; v0.3 OTLP receivers (loopback) + OBI config writer + Prometheus scrape on `:9090` + OBI-metrics → OTel-SDK forwarder + optional loopback debug endpoint at `:9099`. v0.4 adds an opt-in `--controller-addr` gRPC client that consumes `MonitoringSpec` deltas from `ollie-controller`.
 - `cmd/ollie-controller/` — v0.4 control-plane binary. controller-runtime manager with Lease-based leader election; reconciles TrafficMonitor + ClusterTrafficPolicy + Pod into per-pod `MonitoringSpec`s; gRPC `AgentSession` stream server on `:9102` for agent delivery.
 - `pkg/` — public API: `capture` (Manager + TranslateMetrics/TranslateTraces + NewPromMeterProvider), `obsapi`, `sink`, `topology`, `store` (interface stub; concrete span/edge store lands in v0.5), `query`, `controller`, `schema` (label-key + bucket constants)
-- `internal/` — private packages: `obiconfig` (typed OBI YAML schema + atomic writer), `otlpreceiver` (loopback gRPC + HTTP OTLP receivers), `debugendpoint` (loopback PID-control HTTP), `archtest` (enforces OBI import boundary)
+- `internal/` — private packages: `obiconfig` (typed OBI YAML schema + atomic writer), `otlpreceiver` (loopback gRPC + HTTP OTLP receivers), `debugendpoint` (loopback PID-control HTTP), `scrapeauth` (in-process TokenReview + SubjectAccessReview middleware for the scrape endpoint), `archtest` (enforces OBI import boundary)
 - `images/ollie/` — Dockerfile (distroless static, CGO disabled)
 - `k8s/` — install manifests (namespace + RBAC + DaemonSet with `obi` + `agent` containers + default-deny NetworkPolicy + kustomization)
 - `tests/contract/obi/` — OBI adapter contract tests + fixture harness

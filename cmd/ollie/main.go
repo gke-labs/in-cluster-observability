@@ -34,13 +34,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/gke-labs/in-cluster-observability/internal/debugendpoint"
+	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
 )
 
@@ -56,6 +60,8 @@ func main() {
 	obiConfig := flag.String("obi-config", "/etc/ollie/obi-config/config.yaml", "shared-volume path where the agent writes OBI's config (empty disables writing)")
 	obiInstrumentPorts := flag.String("obi-instrument-ports", "", "seed OBI's discovery.instrument with one entry matching processes on these listening ports (OBI format: \"80\", \"80,8080\", \"8000-8999\"). v0.3 L7 smoke-test knob; harmless once the v0.4 controller pushes per-PID MonitoringSpecs.")
 	scrapeAddr := flag.String("scrape-addr", "0.0.0.0:9090", "bind address for the production Prometheus scrape endpoint at /metrics (empty disables). Per ADR-0021 this is the single scrape URL — exposes both agent self-obs and re-emitted OBI metrics.")
+	scrapeAuth := flag.String("scrape-auth", "auto", "authn/authz for the scrape endpoint (#145): 'token' requires a bearer token, validated via TokenReview + SubjectAccessReview for `get` on nonResourceURL /metrics (grant via the ollie-metrics-reader ClusterRole; fail-closed); 'none' disables auth; 'auto' picks token when running in-cluster, none otherwise. Loopback requests are always exempt (pod-internal debugging).")
+	scrapeAuthAudiences := flag.String("scrape-auth-audiences", "", "comma-separated token audiences required by --scrape-auth=token (projected-token binding). Empty accepts standard API-server-audience tokens — required for managed collectors (GMP), which can't mint custom audiences.")
 	controllerAddr := flag.String("controller-addr", "", "gRPC target for the v0.4 ollie-controller (e.g. ollie-controller.ollie-system.svc:9102). Empty disables the controller client; agent runs in standalone v0.3 mode (--obi-instrument-ports seed).")
 	nodeName := flag.String("node-name", os.Getenv("KUBE_NODE_NAME"), "K8s node this agent runs on. Defaults to $KUBE_NODE_NAME (populated via Downward API in k8s/daemonset.yaml).")
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
@@ -132,8 +138,13 @@ func main() {
 	// Production Prometheus scrape listener.
 	var scrapeServer *http.Server
 	if *scrapeAddr != "" {
+		scrapeHandler, err := buildScrapeHandler(promHandler, *scrapeAuth, *scrapeAuthAudiences)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scrape auth init failed: %v\n", err)
+			os.Exit(1)
+		}
 		mux := http.NewServeMux()
-		mux.Handle("/metrics", promHandler)
+		mux.Handle("/metrics", scrapeHandler)
 		l, err := net.Listen("tcp", *scrapeAddr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "scrape listen %s: %v\n", *scrapeAddr, err)
@@ -205,4 +216,50 @@ func main() {
 
 	<-ctx.Done()
 	fmt.Fprintln(os.Stderr, "received shutdown signal; draining")
+}
+
+// buildScrapeHandler applies the --scrape-auth mode to the Prometheus
+// handler. Mode "auto" resolves to "token" when an in-cluster config
+// is available (the production DaemonSet), "none" otherwise (dev
+// boxes, `go run`, Kind exec-based smoke flows outside a pod).
+//
+// The loopback debug endpoint (--debug-endpoint) intentionally stays
+// unauthenticated: it binds 127.0.0.1 only, the same trust boundary
+// as the loopback exemption here.
+func buildScrapeHandler(promHandler http.Handler, mode, audiences string) (http.Handler, error) {
+	if mode == "auto" {
+		if _, err := rest.InClusterConfig(); err == nil {
+			mode = "token"
+		} else {
+			mode = "none"
+		}
+		fmt.Fprintf(os.Stderr, "scrape auth: auto resolved to %s\n", mode)
+	}
+	switch mode {
+	case "none":
+		fmt.Fprintln(os.Stderr, "scrape auth: DISABLED — /metrics is unauthenticated on the scrape address")
+		return promHandler, nil
+	case "token":
+		cfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("--scrape-auth=token requires in-cluster credentials: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("building clientset: %w", err)
+		}
+		var auds []string
+		if audiences != "" {
+			auds = strings.Split(audiences, ",")
+		}
+		mw := scrapeauth.New(scrapeauth.Config{
+			Client:         client,
+			Audiences:      auds,
+			ExemptLoopback: true,
+		})
+		fmt.Fprintf(os.Stderr, "scrape auth: token (TokenReview + SubjectAccessReview, audiences=%q)\n", audiences)
+		return mw.Wrap(promHandler), nil
+	default:
+		return nil, fmt.Errorf("unknown --scrape-auth mode %q (want auto|token|none)", mode)
+	}
 }

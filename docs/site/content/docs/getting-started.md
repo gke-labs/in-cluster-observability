@@ -141,6 +141,8 @@ kubectl debug -n ollie-system "$AGENT_POD" \
   curl -s http://127.0.0.1:9090/metrics
 ```
 
+This works without credentials because loopback (pod-internal) requests are exempt from scrape auth. From anywhere else on the cluster network, `/metrics` requires a bearer token — see [Wiring Prometheus](#wiring-prometheus).
+
 ## 9. What you should see
 
 Three families of metrics show up:
@@ -193,6 +195,11 @@ That's an end-to-end demonstration: nginx received traffic → OBI's eBPF uprobe
 ## Wiring Prometheus
 
 Each agent pod exposes `:9090/metrics` on its pod IP. Point your Prometheus at the agent DaemonSet via a `PodMonitor` (Prometheus Operator), an inline `kubernetes_sd_configs` `pod` role, or a `Service` with `Endpoints` per pod.
+
+Two access controls apply in the default install:
+
+1. **NetworkPolicy** (`k8s/networkpolicy.yaml`) allows scrape ingress only from the `gmp-system` namespace. Running a different scraper? Patch the namespace name in your kustomize overlay (recipe in the manifest comment). No-op on CNIs without policy enforcement (e.g. Kind's default kindnetd).
+2. **Bearer-token auth**: the scraper must send a ServiceAccount token authorized for `get` on `/metrics`. GMP's `gmp-system/collector` SA is pre-authorized; for others, add your scraper's SA to the `ollie-metrics-reader` ClusterRoleBinding (`k8s/rbac.yaml`) and configure the scraper to send its token — e.g. for Prometheus Operator, add to the `PodMonitor` endpoint: `authorization: {credentials: ...}` or `bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token`.
 
 A minimal `PodMonitor` (assumes Prometheus Operator is installed):
 

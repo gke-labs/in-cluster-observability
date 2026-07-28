@@ -164,6 +164,13 @@ spec:
             - --controller-addr=ollie-controller.ollie-system.svc:9102
             - --obi-instrument-ports=80,443,8080,8443
             - --scrape-addr=0.0.0.0:9090
+            # Bearer-token auth on /metrics (#145): scrapers must
+            # present a ServiceAccount token bound to the
+            # ollie-metrics-reader ClusterRole (k8s/rbac.yaml).
+            # Loopback (pod-internal) requests are exempt. Explicit
+            # here even though in-cluster 'auto' resolves the same,
+            # so the production posture is visible in the manifest.
+            - --scrape-auth=token
           env:
             # Downward API: node name flows into the agent's
             # AgentHello so the controller can route per-pod deltas
