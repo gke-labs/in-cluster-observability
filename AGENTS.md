@@ -29,7 +29,7 @@ What's in the repo:
 - `pkg/` — public API: `capture` (Manager + TranslateMetrics/TranslateTraces + NewPromMeterProvider), `obsapi`, `sink`, `topology`, `store` (interface stub; concrete span/edge store lands in v0.5), `query`, `controller`, `schema` (label-key + bucket constants)
 - `internal/` — private packages: `obiconfig` (typed OBI YAML schema + atomic writer), `otlpreceiver` (loopback gRPC + HTTP OTLP receivers), `debugendpoint` (loopback PID-control HTTP), `archtest` (enforces OBI import boundary)
 - `images/ollie/` — Dockerfile (distroless static, CGO disabled)
-- `k8s/` — install manifests (namespace + RBAC + DaemonSet with `obi` + `agent` containers + kustomization)
+- `k8s/` — install manifests (namespace + RBAC + DaemonSet with `obi` + `agent` containers + default-deny NetworkPolicy + kustomization)
 - `tests/contract/obi/` — OBI adapter contract tests + fixture harness
 - `dev/ci/presubmits/` — CI script wrappers
 - `.github/workflows/` — CI YAML

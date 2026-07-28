@@ -1,0 +1,116 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default-deny ingress for ollie-system workloads (#143).
+#
+# The agent re-emits OBI-captured metrics — carrying k8s.* identity
+# and traffic volumes for monitored workloads across namespaces — on
+# :9090. Without a policy, any pod in the cluster can scrape it.
+# These policies flip both workloads to default-deny ingress with the
+# minimum allow rules:
+#
+#   agent      :9090 (scrape)  <- metrics-collection namespace only
+#   controller :9102 (stream)  <- agent pods in ollie-system only
+#   controller :9100 (metrics) <- metrics-collection namespace only
+#
+# The controller's :9101 healthz needs no rule: kubelet probes
+# originate from the node and bypass NetworkPolicy.
+#
+# The scraper is identified by NAMESPACE NAME via the API-server-
+# managed `kubernetes.io/metadata.name` label (immutable, set
+# automatically on every namespace). A custom opt-in label is
+# deliberately NOT used: label-based grants are only as strong as
+# label-write RBAC, whereas a namespace name can't be spoofed. The
+# default is `gmp-system` (GKE Managed Prometheus collectors). For a
+# different scraper, patch the namespace name in your kustomize
+# overlay, e.g. for prometheus-operator in `monitoring`:
+#
+#   patches:
+#     - target: { kind: NetworkPolicy, namespace: ollie-system }
+#       patch: |-
+#         - op: replace
+#           path: /spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+#           value: monitoring
+#
+# Caveats:
+#   - Enforcement requires a policy-capable CNI (GKE Dataplane V2:
+#     yes; Kind's default kindnetd: no — the smoke-test flow is
+#     unaffected). Network position is defense in depth, not
+#     identity; bearer-token auth on the endpoint is #145.
+#   - Loopback traffic (OBI -> agent OTLP on 127.0.0.1) is intra-pod
+#     and never subject to NetworkPolicy.
+#
+# The v1.0 Helm chart templates the scraper namespace as a value
+# (#121); a controller-reconciled knob may supersede this static
+# manifest later.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollie-agent-ingress
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ollie
+      app.kubernetes.io/component: agent
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
+      ports:
+        - port: 9090
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollie-controller-ingress
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ollie
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+  ingress:
+    # Scraper -> controller self-obs metrics. Same namespace-name
+    # pinning as the agent rule above; patch both together.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
+      ports:
+        - port: 9100
+          protocol: TCP
+    # Agent DaemonSet -> gRPC AgentSession stream. Same-namespace
+    # podSelector: only ollie agent pods reach :9102.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ollie
+              app.kubernetes.io/component: agent
+      ports:
+        - port: 9102
+          protocol: TCP
