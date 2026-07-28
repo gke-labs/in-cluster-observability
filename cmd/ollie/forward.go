@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
+	"github.com/gke-labs/in-cluster-observability/pkg/schema"
 )
 
 // metricForwarder re-records translated MetricEvents into an OTel SDK
@@ -38,10 +39,18 @@ type metricForwarder struct {
 	meter    metric.Meter
 	counters sync.Map // map[string]metric.Float64Counter
 	gauges   sync.Map // map[string]metric.Float64Gauge
+
+	// droppedLabels counts attributes withheld from re-emission by
+	// the schema.ForwardableLabel allowlist (#144), keyed by the
+	// dropped attribute key so operators can see what's filtered.
+	droppedLabels metric.Int64Counter
 }
 
 func newMetricForwarder(meter metric.Meter) *metricForwarder {
-	return &metricForwarder{meter: meter}
+	f := &metricForwarder{meter: meter}
+	f.droppedLabels, _ = meter.Int64Counter("ollie_forward_labels_dropped_total",
+		metric.WithDescription("OBI attributes withheld from /metrics re-emission by the label allowlist, by attribute key"))
+	return f
 }
 
 func (f *metricForwarder) Record(ctx context.Context, ev capture.MetricEvent) {
@@ -55,7 +64,13 @@ func (f *metricForwarder) Record(ctx context.Context, ev capture.MetricEvent) {
 	case "target_info", "otel_scope_info":
 		return
 	}
-	opts := metric.WithAttributes(attrsToOTel(ev.Attributes)...)
+	kvs, dropped := attrsToOTel(ev.Attributes)
+	for _, key := range dropped {
+		if f.droppedLabels != nil {
+			f.droppedLabels.Add(ctx, 1, metric.WithAttributes(attribute.String("label", key)))
+		}
+	}
+	opts := metric.WithAttributes(kvs...)
 	if looksCumulative(ev.Name) {
 		if c := f.counter(ev.Name); c != nil {
 			c.Add(ctx, ev.Value, opts)
@@ -118,13 +133,22 @@ var cumulativeSuffixes = []string{
 	".rx", ".tx",
 }
 
-func attrsToOTel(m map[string]string) []attribute.KeyValue {
+// attrsToOTel converts MetricEvent attributes to OTel KeyValues,
+// admitting only keys on the schema.ForwardableLabel allowlist. The
+// scrape endpoint's payload is bounded by that allowlist rather than
+// by whatever the pinned OBI version emits (#144). Dropped keys are
+// returned for self-obs accounting.
+func attrsToOTel(m map[string]string) (kvs []attribute.KeyValue, dropped []string) {
 	if len(m) == 0 {
-		return nil
+		return nil, nil
 	}
-	kvs := make([]attribute.KeyValue, 0, len(m))
+	kvs = make([]attribute.KeyValue, 0, len(m))
 	for k, v := range m {
+		if !schema.ForwardableLabel(k) {
+			dropped = append(dropped, k)
+			continue
+		}
 		kvs = append(kvs, attribute.String(k, v))
 	}
-	return kvs
+	return kvs, dropped
 }

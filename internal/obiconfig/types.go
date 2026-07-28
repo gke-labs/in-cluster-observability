@@ -55,7 +55,10 @@ type KubernetesAttrs struct {
 }
 
 // Routes governs OBI's URL-path handling. We leave templating to v0.6
-// (#108) and set unmatched: wildcard so OBI doesn't drop paths.
+// (#108) and set unmatched: wildcard, which collapses every unmatched
+// path to a literal "/**" http.route — it does NOT preserve raw paths
+// (that's the `path` option, which copies request paths into metric
+// labels: a cardinality explosion and a data-sensitivity leak, #144).
 type Routes struct {
 	Unmatched string `yaml:"unmatched,omitempty"`
 }

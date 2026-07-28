@@ -43,6 +43,51 @@ const (
 	LabelServiceNamespace   = "service.namespace"
 )
 
+// Forwarded-label allowlist (#144). The agent's metric forwarder
+// re-emits OBI-captured attributes as Prometheus labels on the :9090
+// scrape endpoint; only keys passing ForwardableLabel survive. The
+// endpoint's contents are bounded here, by construction, rather than
+// by whatever attributes the pinned OBI version happens to emit —
+// high-sensitivity keys (url.path, url.full, client.address,
+// server.address, user_agent.original) are excluded deliberately.
+//
+// Stability: Experimental
+var (
+	// ForwardAllowedLabelPrefixes admits attribute families wholesale:
+	// K8s identity (including k8s.src.* / k8s.dst.* dual-sided
+	// attribution on L4 flows), service identity, and protocol-level
+	// network/tcp dimensions.
+	ForwardAllowedLabelPrefixes = []string{"k8s.", "service.", "network.", "tcp."}
+
+	// ForwardAllowedLabelKeys admits individual low-cardinality,
+	// low-sensitivity HTTP dimensions. http.route is safe because the
+	// agent pins OBI's routes.unmatched to wildcard (see
+	// internal/obiconfig), which collapses unmatched paths to "/**".
+	ForwardAllowedLabelKeys = []string{
+		"http.request.method",
+		"http.response.status_code",
+		"http.route",
+	}
+)
+
+// ForwardableLabel reports whether the metric forwarder may re-emit
+// the given OTLP attribute key as a Prometheus label.
+//
+// Stability: Experimental
+func ForwardableLabel(key string) bool {
+	for _, k := range ForwardAllowedLabelKeys {
+		if key == k {
+			return true
+		}
+	}
+	for _, p := range ForwardAllowedLabelPrefixes {
+		if len(key) > len(p) && key[:len(p)] == p {
+			return true
+		}
+	}
+	return false
+}
+
 // Peer-side label keys mirror the source-side namespace.
 //
 // Stability: Stable
