@@ -12,4 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-version: latest
+# Pinned to the ap release that emits hash-pinned, zizmor-clean workflows
+# (gke-labs/gke-labs-infra#352). Keeps `ap generate` output deterministic so
+# ap-verify-generate stays byte-stable in CI.
+version: v0.0.0-20260728141405-4f68d0f10435
