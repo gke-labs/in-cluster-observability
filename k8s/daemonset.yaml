@@ -95,7 +95,12 @@ spec:
               memory: 150Mi
             limits:
               cpu: 500m
-              memory: 300Mi
+              # BPF map allocations are charged to this cgroup (kernel
+              # ≥5.11). Loading OBI's full L7 uprobe tracer set on the
+              # first instrumented process needs headroom well past the
+              # steady-state footprint — at 300Mi the tracer load died
+              # with ENOMEM on map create (caught by tests/e2e, #150).
+              memory: 512Mi
           securityContext:
             # Capability set matches upstream OBI's documented
             # unprivileged DaemonSet example. The L7 caps (SYS_PTRACE,
