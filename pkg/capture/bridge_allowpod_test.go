@@ -16,6 +16,7 @@ package capture_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,12 +106,32 @@ func TestBlockPod_RemovesEntry(t *testing.T) {
 	_ = readConfigSettling(t, path, "k8s_pod_name: x", 3*time.Second)
 
 	_ = mgr.BlockPod("xx-uid")
-	// Wait a debounce-window past the trigger so the writer settles.
-	time.Sleep(700 * time.Millisecond)
-	content := readConfigSettling(t, path, "", 3*time.Second)
+	// Poll for the entry's *absence* rather than sleeping one debounce
+	// window and reading once — a loaded runner can delay the
+	// coalescer past any fixed sleep (flaked in CI on PR #162).
+	content := readConfigUntilGone(t, path, "k8s_pod_name: x", 5*time.Second)
 	if strings.Contains(content, "k8s_pod_name: x") {
 		t.Errorf("BlockPod should remove the entry; got:\n%s", content)
 	}
+}
+
+// readConfigUntilGone polls path until the substring disappears from
+// the file or the deadline passes; returns the last content read.
+func readConfigUntilGone(t *testing.T, path, gone string, deadline time.Duration) string {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	var last string
+	for time.Now().Before(end) {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			last = string(b)
+			if !strings.Contains(last, gone) {
+				return last
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return last
 }
 
 // TestAllowPod_EmptyUIDIsRejected: an empty UID is a programmer
