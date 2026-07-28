@@ -15,7 +15,9 @@
 package otlpreceiver
 
 import (
+	"compress/gzip"
 	"io"
+	"mime"
 	"net/http"
 
 	colllogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -76,14 +78,31 @@ func (x *httpLogs) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func readBody(w http.ResponseWriter, r *http.Request, msg proto.Message) bool {
-	body, err := io.ReadAll(r.Body)
+	defer r.Body.Close()
+
+	// OTLP/HTTP allows gzip-compressed bodies (#154 — an OBI image
+	// that enables exporter compression must not 400).
+	var reader io.Reader = r.Body
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return false
+		}
+		defer gz.Close()
+		reader = gz
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return false
 	}
-	defer r.Body.Close()
 
-	contentType := r.Header.Get("Content-Type")
+	// Parse the media type properly: "application/json; charset=utf-8"
+	// must route to the JSON decoder, not fall through to protobuf
+	// (#154). An absent/unparseable Content-Type defaults to protobuf,
+	// matching the OTLP spec's primary encoding.
+	contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if contentType == "application/json" {
 		if err := protojson.Unmarshal(body, msg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

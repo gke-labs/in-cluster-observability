@@ -148,6 +148,15 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.cfg.HTTPAddr != "" {
 		l, err := net.Listen("tcp", s.cfg.HTTPAddr)
 		if err != nil {
+			// Don't leak a half-started server: the gRPC listener may
+			// already be serving on its own goroutine (#154).
+			s.mu.Lock()
+			gs := s.grpcServer
+			s.mu.Unlock()
+			if gs != nil {
+				gs.Stop()
+				s.wg.Wait()
+			}
 			return fmt.Errorf("otlpreceiver: HTTP listen %q: %w", s.cfg.HTTPAddr, err)
 		}
 		s.mu.Lock()
