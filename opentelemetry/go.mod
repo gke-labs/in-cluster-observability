@@ -5,7 +5,7 @@ go 1.25.7
 toolchain go1.26.5
 
 require (
-	github.com/google/cel-go v0.28.0
+	github.com/google/cel-go v0.29.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.68.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0
