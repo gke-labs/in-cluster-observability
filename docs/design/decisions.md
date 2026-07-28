@@ -522,6 +522,22 @@ The `pkg/capture.Manager` interface from v0.1 stays — its implementation pivot
 
 ---
 
+## ADR-0020: v0.3 Storage MVP implementation decisions
+
+**Status:** Superseded in part by [ADR-0021](#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment). **Reconstructed stub, 2026-07-28** — the original text of this ADR was never committed to this file; ADR-0021 referenced it on 2026-05-18 but the entry was lost. This stub restores the record from ADR-0021's per-clause disposition so the numbering and cross-references resolve. ADR-0021 is authoritative for every clause.
+
+**Context.** Implementation-time decisions for the original v0.3 "Storage MVP" (before the lean pivot). Sub-decision titles, with their fate per ADR-0021:
+
+- **20.1** WAL = reuse `prometheus/tsdb/wal` — moot (no metric store in v0.3); revisits in v0.5.
+- **20.2** Kubelet client = plain `net/http` — withdrawn (no pidcache).
+- **20.3** Enricher = dedicated `internal/enricher` — withdrawn (no enricher).
+- **20.4** Scrape sink on `:9090` — restated: `:9090` is the OTel SDK Prometheus exporter on the agent.
+- **20.5** `pkg/schema` = constants-only — stands.
+- **20.6** In-memory mode = empty `WALPath` — moot; v0.5 reconsiders.
+- **20.7** tsdb HEAD + WAL deferred — moot; v0.5's plan unchanged.
+
+---
+
 ## ADR-0021: Lean v0.3 — agent re-uses OBI's native enrichment
 
 **Status:** Accepted, 2026-05-18 — supersedes [ADR-0017.4](#174-strip-obis-built-in-kubernetes-attribution); supersedes the storage / enricher / scrape-sink sub-decisions in [ADR-0020](#adr-0020-v03-storage-mvp-implementation-decisions); the WAL deferral in ADR-0020.7 is moot (no `pkg/store` metric path to back).
@@ -645,6 +661,52 @@ Neither is a v0.4 blocker; both are v0.5 candidates once the in-cluster store gi
 - Phase 3: RBAC + CR status + AgentStatus feedback (closes #91, #92, #93).
 
 Each phase ships as its own PR against `main` from a stacked branch on the user's fork (`mastersingh24/in-cluster-observability`).
+
+---
+
+## ADR-0023: Verification-first — v0.4.5 milestone gates v0.5
+
+**Status:** Accepted, 2026-07-28
+
+**Context.** A full project assessment (2026-07-28) found the design docs well ahead of the verification story, with three structural gaps between what the docs promise and what CI can actually check:
+
+1. **No automated coverage of the OBI boundary.** [`testing-and-benchmarks.md`](testing-and-benchmarks.md) specifies a Kind-based e2e presubmit (`ap-e2e`); none exists for the ollie DaemonSet. The contract fixtures are the ADR-0019.6 synthetic seeds — they freeze the translator against itself, not against OBI's wire format, so an OBI image bump that changes OTLP shape passes CI silently. The two most consequential historical bugs (the `--config` vs `OTEL_EBPF_CONFIG_PATH` incident in ADR-0021; L7 silently no-oping without caps) were both found only by live runs.
+2. **The `:9090` metrics path is not sound as a Prometheus source.** The OTLP translator never inspects `AggregationTemporality` or `IsMonotonic` (correctness silently depends on OBI exporting delta), histograms are reduced to their sum (no `rate()`/percentiles downstream), and the forwarder's counter-vs-gauge decision is a metric-name-suffix guess with zero test coverage.
+3. **Lifecycle bugs in `pkg/capture`** (Stop-after-failed-Start deadlock, send-on-closed-channel panic in the recover path, receiver leak on partial start) sit in the package that v0.4's controller and v0.5's store both build on.
+
+Meanwhile the OBI pin (v0.9.0) is one minor behind upstream (v0.10.0, docs updated 2026-07-20), and OBI permits breaking changes per minor.
+
+**Decision.** Insert a **v0.4.5 "Verification & Soundness"** milestone between v0.4 and v0.5, sequenced **after** the v0.4 security remediation ([#143](https://github.com/gke-labs/in-cluster-observability/issues/143)–[#145](https://github.com/gke-labs/in-cluster-observability/issues/145)) lands. Scope, tracked in issues [#150](https://github.com/gke-labs/in-cluster-observability/issues/150)–[#156](https://github.com/gke-labs/in-cluster-observability/issues/156), [#158](https://github.com/gke-labs/in-cluster-observability/issues/158):
+
+- Minimal Kind e2e presubmit exercising the real DaemonSet (#150).
+- Contract fixtures recorded from a real OBI via the REGENERATE.md recorder pipeline (#151).
+- OBI image bump v0.9.0 → v0.10.0 under that coverage, per the ADR-0010/0018 single-bump-PR policy (#152).
+- OTLP temporality + histogram correctness in translator and forwarder (#153).
+- `pkg/capture` lifecycle fixes (#154).
+- DaemonSet production trim: probes, tolerations, priorityClass, PSA labels, seccomp, updateStrategy (#155).
+- Build/CI hygiene: pinned `ap`, digest-pinned builder, `go mod tidy` (#156).
+- Tracker hygiene: open-PR sweep + stale milestone-issue closure, explicitly gated on #143–#145 merging first (#158).
+
+Two sequencing rules ride with this ADR:
+
+- **v0.5 proceeds as a vertical slice**: tsdb HEAD (#78) → PromQL fan-out + query server (#94, #95) → `custom.metrics.k8s.io` (#96) → a working HPA demo, before the remaining v0.5 breadth (CEL streaming, OTLP push, `iobsctl`, identity). The HPA demo is the differentiation claim versus "just deploy Beyla/OBI directly"; it should exist as early as possible.
+- **The library-first posture gets its own ADR before v0.5's public store/query interfaces freeze** ([#157](https://github.com/gke-labs/in-cluster-observability/issues/157)): post-ADR-0018, the capture layer is a container topology, not an embeddable Go capability, and requirements §2.4 / `public-api.md` need to say precisely what *is* embeddable. Stability tags on unimplemented `pkg/*` packages downgrade to Experimental as part of that work.
+
+**Consequences.**
+
+- ✅ The riskiest integration in the system (the OBI boundary) becomes CI-checkable before more layers stack on it; OBI bumps become judgeable PRs instead of faith-based ones.
+- ✅ `:9090` numbers become trustworthy for rates and percentiles — or are demonstrably not yet, with the gap visible in CI rather than in a user's dashboard.
+- ✅ v0.5 starts on a cleaner runway with its thesis demo (HPA on captured metrics) front-loaded.
+- ⚠️ v0.5 starts later in wall-clock terms. Accepted: the assessment's judgment is that unverified foundations are the bigger schedule risk.
+- ⚠️ One more open milestone in the tracker. Mitigated by #158's milestone-closure sweep.
+
+**Rejected alternatives.**
+
+- *Fold this work into v0.4.* v0.4 is nearly done and already grew the security remediation; growing it further delays its merge gate without benefit.
+- *Fold it into v0.5.* Mixes verification debt with feature work and invites the debt to slip; the point is that these items *gate* v0.5.
+- *Skip straight to v0.5 and verify later.* The ADR-0021 postmortem is the counterexample: two milestones of work sat on an integration that had never actually been exercised.
+
+**Implemented in.** Milestone `v0.4.5 Verification & Soundness` and issues #150–#158, filed 2026-07-28.
 
 ---
 
