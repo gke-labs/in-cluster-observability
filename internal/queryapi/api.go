@@ -111,6 +111,25 @@ func (a *API) Routes() *http.ServeMux {
 	return mux
 }
 
+// InstantVector evaluates one instant query over the fan-out and
+// returns the resulting vector (scalar results are rejected; the
+// custom-metrics templates all aggregate to vectors). Degraded
+// fan-outs still return data — the HPA gets a slightly-low number
+// rather than no number (storage-and-query.md §5.3).
+func (a *API) InstantVector(ctx context.Context, expr string, ts time.Time) (promql.Vector, error) {
+	ctx, _ = fanout.WithStats(ctx)
+	q, err := a.engine.NewInstantQuery(ctx, a.queryable, nil, expr, ts)
+	if err != nil {
+		return nil, err
+	}
+	defer q.Close()
+	res := q.Exec(ctx)
+	if res.Err != nil {
+		return nil, res.Err
+	}
+	return res.Vector()
+}
+
 // envelope is the Prometheus API response shape plus the fan-out
 // degradation extras.
 type envelope struct {

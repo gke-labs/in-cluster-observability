@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/gke-labs/in-cluster-observability/internal/custommetrics"
 	"github.com/gke-labs/in-cluster-observability/internal/fanout"
 	"github.com/gke-labs/in-cluster-observability/internal/queryapi"
 	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
@@ -61,6 +63,9 @@ func main() {
 	tokenFile := flag.String("agent-token-file", defaultTokenFile, "bearer token file presented to the agents' authenticated read endpoints (empty disables)")
 	apiAuth := flag.String("api-auth", "auto", "authn/authz for /api/v1/* (same posture as the agent's --scrape-auth): 'token' validates bearer tokens via TokenReview + SubjectAccessReview against the request path as nonResourceURL (grant via the ollie-promql-reader ClusterRole); 'none' disables; 'auto' picks token in-cluster. Health probes are always unauthenticated; loopback is always exempt (port-forward debugging).")
 	apiAuthAudiences := flag.String("api-auth-audiences", "", "comma-separated token audiences for --api-auth=token; empty accepts standard API-server-audience tokens")
+	tlsAddr := flag.String("tls-addr", "0.0.0.0:6443", "bind address for the HTTPS listener serving custom.metrics.k8s.io to the aggregation layer (#96). Serves a startup-generated self-signed cert; the APIService registers with insecureSkipTLSVerify per ADR-0025 §7 (real CA wiring is v0.6). Empty disables.")
+	tlsHostnames := flag.String("tls-hostnames", "ollie-query.ollie-system.svc,ollie-query.ollie-system.svc.cluster.local,localhost", "comma-separated DNS SANs for the self-signed serving cert")
+	cmConfig := flag.String("custom-metrics-config", "/etc/ollie/custom-metrics/config.yaml", "path to the metric-path -> PromQL template config (ConfigMap-mounted; missing file falls back to built-in defaults)")
 	flag.Parse()
 
 	if *versionOnly {
@@ -114,6 +119,43 @@ func main() {
 	if err != nil {
 		logger.Error("api auth init failed", "err", err)
 		os.Exit(1)
+	}
+
+	// custom.metrics.k8s.io for the HPA (#96), on its own HTTPS
+	// listener for the aggregation layer.
+	if *tlsAddr != "" {
+		cm, err := custommetrics.New(custommetrics.Config{
+			Evaluator:  api,
+			ConfigPath: *cmConfig,
+			Logger:     logger,
+		})
+		if err != nil {
+			logger.Error("custom-metrics init failed", "err", err)
+			os.Exit(1)
+		}
+		cert, err := custommetrics.SelfSignedCert(strings.Split(*tlsHostnames, ","))
+		if err != nil {
+			logger.Error("self-signed cert generation failed", "err", err)
+			os.Exit(1)
+		}
+		tlsSrv := &http.Server{
+			Addr:              *tlsAddr,
+			Handler:           cm.Routes(),
+			ReadHeaderTimeout: 5 * time.Second,
+			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		}
+		go func() {
+			if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				logger.Error("custom-metrics server failed", "err", err)
+				cancel()
+			}
+		}()
+		defer func() {
+			sCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer sCancel()
+			_ = tlsSrv.Shutdown(sCtx)
+		}()
+		logger.Info("custom-metrics API listening", "addr", *tlsAddr, "group-version", custommetrics.GroupVersion)
 	}
 
 	l, err := net.Listen("tcp", *httpAddr)
