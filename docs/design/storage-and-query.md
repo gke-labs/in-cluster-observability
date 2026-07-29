@@ -5,7 +5,8 @@
 - The metric store is `internal/store` (not `pkg/store`, per ADR-0024) and embeds the full `tsdb.DB` via `tsdb.Open` with 2-min blocks / 10-min retention — not a raw `head.NewHead` (§2.1). The `Store`/`Engine` Go interfaces sketched in §2.4 and §4.1 were deleted with ADR-0024; the store's consumer is the binary.
 - Ingest is a 1 s self-scrape of the agent's in-process Prometheus registry (§2.4's event-dispatch write path assumed the enricher pipeline that ADR-0021 removed).
 - Fan-out is at the **storage layer**: agents serve raw series over gRPC, the query server merges and runs the stock PromQL engine centrally. §5.1's per-node partial-aggregation scheme is superseded (it mis-aggregates non-decomposable queries). §5.3's degraded/`missing_nodes` contract stands.
-- The span/edge ring buffer (§3) and its WAL (§3.4) are deferred past the vertical slice (#84, #79); CEL query surfaces (§4.2) land with them.
+- The span/edge ring buffer (§3) landed re-shaped by [ADR-0026](decisions.md#adr-0026-v05-breadth-implementation-decisions) §5: a spans-only, in-memory ring of **raw OTLP** (resource + span) fed by the capture bridge's raw tee, with live Subscribe (drop-oldest + gap markers) — no span WAL (§3.4 dropped), and edges deferred until a producer exists (the dual-attributed L4 flow metrics answer topology queries meanwhile). CEL (§4.2) evaluates agent-side against OTLP field paths.
+- §2.5's per-batch WAL fsync is tsdb's segment/page policy in practice (no per-commit knob); the crash-loss window stays inside the 30 s budget (ADR-0026 §4).
 
 **Owners:** TBD
 

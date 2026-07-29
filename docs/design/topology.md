@@ -1,6 +1,6 @@
 # Topology
 
-**Status:** Draft, 2026-05-17
+**Status:** Draft, 2026-05-17 — **superseded in substance by [ADR-0021](decisions.md#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment) and [ADR-0026](decisions.md#adr-0026-v05-breadth-implementation-decisions) (2026-07-29).** The identity plane this doc designs (canonical informer → broadcast → agent `IdentityCache` → enricher, §3–§6) was never built: OBI's own informer resolves K8s identity in-process and stamps **both sides** of L4 flows at owner granularity (`k8s.src.*`/`k8s.dst.*`, fixture-verified), which serves every current consumer. #101–#103 closed on that evidence. This doc is retained for the reopen case — L7 metric peer identity or explicit external-peer labeling — and for the Edge schema sketch (production of edges is likewise deferred, ADR-0026 §5).
 **Owners:** TBD
 
 This document specifies how the system attaches Kubernetes identity to every captured record, on both ends of a connection — the source pod and the peer. It implements [ADR-0005](decisions.md#adr-0005-topology-via-kubelet-pid-mapping--k8s-informer) and [ADR-0009](decisions.md#adr-0009-informer-custody--hybrid), and satisfies requirement §2.1's topology metadata clause.

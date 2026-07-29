@@ -788,11 +788,47 @@ Two sequencing rules ride with this ADR:
 
 ---
 
+## ADR-0026: v0.5 breadth implementation decisions
+
+**Status:** Accepted, 2026-07-29.
+
+**Context.** The remainder of the v0.5 milestone — egress push (#97, #98), streaming subscribe (#99), `iobsctl` (#100), the span/edge ring (#84), WAL/compaction tuning (#79), the identity trio (#101–#103), and the validating webhook (#90) — was specified before ADR-0021 (OBI native enrichment), ADR-0024 (wire-protocol extensibility), and ADR-0025 (vertical-slice shape). Like ADR-0025, this ADR pins the deltas once. Two pieces of recorded evidence drive the biggest cuts: the contract fixtures from the pinned OBI image show **dual-sided K8s attribution is native on L4 flows** (`k8s.src.namespace/owner.name/owner.type` + `k8s.dst.*` on `obi.network.flow.bytes`), and spans carry `client.address`/`server.address`.
+
+**Decision.**
+
+1. **#101 (identity broadcast) and #102 (fallback informer) are closed as superseded, not implemented.** Both exist to feed an agent-side IP→identity resolver (`IdentityCache`, `topology.PeerResolver`) that ADR-0021 removed — OBI's informer resolves identity in-process and stamps both sides of L4 flows. Building a controller→agent identity plane to enrich records the capture layer already enriches would be pure architecture re-creation. ADR-0009's fallback-informer design rides along: with no agent-side resolver, there is nothing for a fallback informer to feed. Reopen condition (per the ADR-0009 note): a consumer needs peer attribution OBI doesn't provide — L7 *metric* peer identity, or external-IP classification beyond what `k8s.dst.*` absence implies.
+2. **#103 (peer enrichment + cardinality guard) closes with the same evidence.** OBI attributes peers at **owner granularity** (`k8s.dst.owner.name`, not pod name or IP), so the metric-surface cardinality the guard was designed to cap is bounded by construction; raw peer IPs never reach the label allowlist (#144 excludes them deliberately). The unpursued remainder — labeling off-cluster peers `peer.external=true` on metrics — moves to the roadmap with the reopen condition above.
+3. **#90 (validating webhook) moves to v0.6.** A `ValidatingWebhookConfiguration` requires a CA bundle — there is no `insecureSkipTLSVerify` escape hatch for webhooks — so it lands with the v0.6 TLS milestone's CA machinery instead of growing a bespoke cert-injector now. `failurePolicy: Fail` with a self-managed cert is also an availability hazard we should not ship half-hardened.
+4. **#79 is largely satisfied by the ADR-0025 §1 choice of `tsdb.Open`**: the DB already runs head→block compaction on schedule and enforces retention on each cycle. What lands: the two §8 self-obs metrics (`ollie_store_compactions_total`, `ollie_store_wal_fsync_seconds`) re-exported from tsdb's internal registry through an allowlist bridge (keeping the other ~100 tsdb series off the bounded `:9090` surface), and a block-rotation/retention test. **Deviation:** WAL fsync stays on tsdb's segment/page policy rather than per-batch — tsdb exposes no per-commit fsync knob, and the crash-loss window (one in-memory WAL page) is within the §2.5 30-second budget.
+5. **#84 becomes a spans-only, in-memory ring of raw OTLP.** A new **raw tee** on the capture bridge hands the untranslated `Export*ServiceRequest` payloads to consumers; the ring stores `(resource attributes, tracepb.Span)` so CEL filters compile against the OTLP field paths users already know (storage-and-query.md §4.2) with zero translation loss. No span WAL: the consumers are live subscribers (#99) and ad-hoc queries (#100); replaying a 64k-entry, 10-minute window after a crash protects nothing a consumer relies on, and the WAL machinery is the most expensive part of the original spec. **Edges are deferred until a producer exists** — `EdgeEvent` has been an empty stub since v0.2, OBI emits no edge records, and the L4 flow *metrics* (dual-attributed, queryable via PromQL) already answer "who talks to whom."
+6. **#97/#98 are relays, not re-encoders.** `internal/export` pushes the **original OTLP payloads** from the raw tee to operator-configured endpoints — the agent received OTLP, so re-encoding translated events back into OTLP would only lose fidelity. Per-endpoint bounded queue (1024 batches, drop-on-full with `ollie_export_*` accounting), exponential backoff, gRPC and HTTP protocols. **Configuration is agent flags** for v0.5 (`--export-otlp-*`); the CRD surface (sinks-and-extensibility.md open question 3) waits for the control-plane integration to have a real consumer. **Prometheus remote-write v1 rides along** as a third exporter kind, encoding the same gathered-sample stream the store ingester already produces — one normalization path, per ADR-0025 §2.
+7. **#99 ships spans + metrics streaming; CEL evaluates on the agent.** `proto/stream/v1` carries serialized OTLP spans (bytes) plus resource attributes and a gap counter. The query server multiplexes per-agent streams (same discovery as the read fan-out); the CEL program is compiled and applied **agent-side** so non-matching spans never cross the network. Slow consumers get drop-oldest with gap markers, never backpressure into capture. `StreamEdges` is omitted with #84's edge deferral; `StreamMetrics(promql, step)` is periodic instant evaluation on the query server.
+8. **#100 (`iobsctl`) speaks the public surfaces only** — the PromQL HTTP API and the streaming gRPC service via auto port-forward — proving the ADR-0024 claim that first-party tooling needs no private path.
+
+**Consequences.**
+
+- ✅ The leg's code lands where consumers are (ring→stream→CLI as one pipeline), not as speculative infrastructure.
+- ✅ Three issues close on recorded fixture evidence instead of re-implementing what the ADR-0018/0021 architecture already provides.
+- ⚠️ No span durability across agent restarts. Accepted: subscribers observe a gap either way; a WAL would only replay history nobody can have missed less recently than the ring window.
+- ⚠️ External peers remain unlabeled on metrics (`k8s.dst.*` absent ⇒ off-cluster, by inference). Accepted until a consumer needs it explicit; reopen per §2.
+- ⚠️ Webhook validation gap persists through v0.5 — invalid CRs are caught by CRD schema only. Accepted; #90 rides v0.6.
+
+**Rejected alternatives.**
+
+- *Implement #101–#103 as written.* Rebuilds the pre-ADR-0021 enricher architecture alongside the one that replaced it; the fixtures show the output would be redundant at the granularity any current consumer uses.
+- *Span WAL per #84.* Cost concentrated exactly where the design's own consumers (live streams) cannot benefit.
+- *Translate-then-re-encode export.* Strictly worse than relaying the received bytes.
+- *Central CEL evaluation on the query server.* Ships every span off every node to filter most of them out; agent-side filtering is the whole point of having a per-node buffer.
+
+**Implemented in.** v0.5 phase PRs `v0.5/phase-4-breadth-design` through `v0.5/phase-8-iobsctl`.
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.
 - **ADR-0017.4** — superseded by ADR-0021. OBI's native K8s attribute attachment is now ON; the agent attaches none.
 - **ADR-0020** — sub-decisions superseded in part by ADR-0021. See ADR-0021 consequences for the per-clause status.
-- **ADR-0009** — narrowed by ADR-0022.5. Identity broadcasting cut from v0.4 because OBI's informer covers the source-side case natively (ADR-0021); the ADR-0009 mechanism may reopen in v0.5+ for the off-cluster / L7-peer cases that OBI doesn't cover.
+- **ADR-0009** — superseded by ADR-0026 §1–2 (was: narrowed by ADR-0022.5). OBI attributes both sides of L4 flows natively at owner granularity (fixture-verified on the pinned image), so the controller→agent identity plane and its fallback informer have no consumer. Reopen condition: a consumer needs L7 metric peer identity or explicit external-peer labeling.
 
 New ADRs are appended above this section.
