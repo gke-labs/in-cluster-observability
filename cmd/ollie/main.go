@@ -70,6 +70,7 @@ func main() {
 	controllerAddr := flag.String("controller-addr", "", "gRPC target for the v0.4 ollie-controller (e.g. ollie-controller.ollie-system.svc:9102). Empty disables the controller client; agent runs in standalone v0.3 mode (--obi-instrument-ports seed).")
 	storeDir := flag.String("store-dir", "/var/lib/ollie/tsdb", "data directory for the node-local metric store (tsdb blocks + WAL, per ADR-0025; the DaemonSet mounts an emptyDir here). Empty disables the store.")
 	queryAddr := flag.String("query-addr", "0.0.0.0:9091", "bind address for the Prometheus remote-read endpoint at /api/v1/read, serving the node-local store to the query server's fan-out (#95). Empty (or a disabled store) disables it. Auth follows --scrape-auth: token mode requires `post` on nonResourceURL /api/v1/read (granted to the query server's SA by the ollie-query-reader ClusterRole).")
+	spanRingCapacity := flag.Int("span-ring-capacity", 65536, "capacity of the in-memory span ring fed by OBI's raw trace stream (#84, ADR-0026 §5). 0 disables the ring.")
 	nodeName := flag.String("node-name", os.Getenv("KUBE_NODE_NAME"), "K8s node this agent runs on. Defaults to $KUBE_NODE_NAME (populated via Downward API in k8s/daemonset.yaml).")
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
 	debugAddr := flag.String("debug-endpoint-addr", debugendpoint.DefaultAddr, "loopback bind address for the debug endpoint")
@@ -115,6 +116,18 @@ func main() {
 		))
 	}
 
+	// Span ring (#84): holds the raw OTLP spans OBI emits, feeding
+	// live subscribers (#99) and ad-hoc reads (#100). Wired as a raw
+	// tee on the capture bridge so entries keep OTLP field paths.
+	var spanBuf *store.SpanBuffer
+	var rawTee capture.RawTee
+	if *spanRingCapacity > 0 {
+		spanBuf = store.NewSpanBuffer(*spanRingCapacity, promReg)
+		rawTee = &agentRawTee{spans: spanBuf}
+		fmt.Fprintf(os.Stderr, "span ring: capacity %d\n", *spanRingCapacity)
+	}
+	_ = spanBuf // read path lands with the stream service (#99)
+
 	captureCfg := capture.Config{
 		OTLPGRPCAddr:     *otlpGRPC,
 		OTLPHTTPAddr:     *otlpHTTP,
@@ -122,6 +135,7 @@ func main() {
 		ObiConfigPath:    *obiConfig,
 		InitialOpenPorts: *obiInstrumentPorts,
 		MeterProvider:    mp,
+		RawTee:           rawTee,
 	}
 
 	mgr, err := capture.NewBridge(captureCfg)
@@ -196,7 +210,7 @@ func main() {
 	// what the :9090 scrape endpoint serves. The query server fans
 	// reads out across the per-node stores (phase 2).
 	if *storeDir != "" {
-		st, err := store.New(store.Config{Dir: *storeDir})
+		st, err := store.New(store.Config{Dir: *storeDir, MetricsRegisterer: promReg})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "store init failed: %v\n", err)
 			os.Exit(1)
