@@ -751,6 +751,43 @@ Two sequencing rules ride with this ADR:
 
 ---
 
+## ADR-0025: v0.5 vertical-slice implementation decisions
+
+**Status:** Accepted, 2026-07-29.
+
+**Context.** v0.5 ships as a vertical slice — embedded metric store ([#78](https://github.com/gke-labs/in-cluster-observability/issues/78)) → query server + PromQL fan-out ([#94](https://github.com/gke-labs/in-cluster-observability/issues/94), [#95](https://github.com/gke-labs/in-cluster-observability/issues/95)) → `custom.metrics.k8s.io` ([#96](https://github.com/gke-labs/in-cluster-observability/issues/96)) → HPA demo — under [ADR-0024](#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157)'s posture (store/query designed for the binary, under `internal/`). The issue texts and [`storage-and-query.md`](storage-and-query.md) predate ADR-0021 and ADR-0024: they reference `pkg/store`/`pkg/query`/`pkg/sink/custommetrics` surfaces that no longer exist, an enricher pipeline that was never built, and cert-manager TLS that belongs to the v0.6 hardening milestone. This ADR pins the implementation shape so the slice can land without re-litigating each deviation per PR. Like ADR-0022, it records sub-decisions individually.
+
+**Decision.**
+
+1. **The metric store lives in `internal/store` and embeds the full `tsdb.DB` via `tsdb.Open`, not a raw `head.NewHead`.** Options: `MinBlockDuration = MaxBlockDuration = 2m`, `RetentionDuration = 10m`, WAL enabled — the ADR-0012 numbers stand. The DB manages WAL replay, head→block compaction, and retention deletion; hand-assembling those around a bare HEAD (storage-and-query.md §2.1's plan) re-implements tsdb lifecycle for no gain. Data dir `/var/lib/ollie/tsdb` on an `emptyDir` volume: with 10-minute retention, durability across pod deletion is worthless; the WAL still recovers from container restarts within the pod's life.
+2. **Ingest is a registry self-scrape, not an event-dispatch write path.** A 1 s loop gathers the agent's in-process Prometheus registry (self-obs metrics + the OBI const-metric collector from #153) and appends every sample to the tsdb head. One normalization path: whatever `/metrics` on `:9090` serves is, by construction, exactly what PromQL sees. storage-and-query.md §2.4's `WriteMetric`-per-event design assumed the deleted enricher pipeline; the self-scrape replaces it. Histograms land as classic `_bucket`/`_sum`/`_count` series.
+3. **Fan-out happens at the storage layer, not the query layer.** The agent exposes a gRPC series-select service (`proto/query/v1`: label matchers + time range in, streamed raw series out) backed by the local tsdb querier. The query server implements Prometheus `storage.Queryable` by fanning `Select` out to every agent and merging series, then runs the stock `promql.Engine` centrally over the merged view. This gives exact PromQL semantics for free and supersedes storage-and-query.md §5.1's per-node partial-aggregation scheme ("partials are themselves rates and summed"), which silently mis-aggregates non-decomposable queries (`histogram_quantile`, `topk`, subqueries). The §5.3 degraded contract stands: per-agent deadline 0.8× overall; misses annotate the response with `degraded=true` + `missing_nodes`.
+4. **The query server is a separate binary, `cmd/ollie-query`.** Follows the `cmd/ollie-controller` precedent. #94's `--role=query` flag on `cmd/ollie` came from the `obsapi.Role` design deleted by ADR-0024; one binary per deployable keeps images minimal and flags disjoint.
+5. **Agents are discovered via a headless Service.** `k8s/agent-service.yaml` (`clusterIP: None`, selector = agent pods) gives per-pod DNS A records; the query server re-resolves on an interval. No controller registry coupling, no `AgentHello` proto change; if per-agent metadata is ever needed the proto has reserved field numbers.
+6. **The custom-metrics server is hand-rolled and minimal, in `internal/custommetrics` inside `ollie-query`.** It serves `v1beta1` discovery plus the namespaced-object metric GET paths the HPA uses, mapping metric names to PromQL templates from a ConfigMap (defaults per storage-and-query.md §7). `kubernetes-sigs/custom-metrics-apiserver` (and its full `k8s.io/apiserver` dependency tree) is rejected for now per the minimize-deps convention — the HPA read path is small. Revisit if [#111](https://github.com/gke-labs/in-cluster-observability/issues/111) (aggregation hints) outgrows it.
+7. **v0.5 TLS posture: self-signed at startup, verification deferred to v0.6.** The aggregation layer requires HTTPS on the backend, so `ollie-query` generates a self-signed serving cert at startup and the `APIService` registers with `insecureSkipTLSVerify: true`; front-proxy auth headers are accepted without CA verification, with the default-deny NetworkPolicy bounding exposure. #94's cert-manager `Certificate` and #96's CA-bundle injection move to v0.6 (TLS milestone), where they belong with the rest of transport hardening.
+8. **Slice scope: metrics only.** The span/edge ring buffer (#84) and WAL fsync/snapshot work (#79) are not on the HPA path and land in a later leg. `pkg/topology` is deleted with the other ADR-0024 stubs; an `internal/` identity type returns with its first consumer (#84, #101–#103).
+
+**Consequences.**
+
+- ✅ Every PromQL construct works against the fan-out from day one — no aggregation-shape allowlist, no wrong quantiles.
+- ✅ `:9090` scrape output and query-server results cannot drift; contract-test goldens cover both.
+- ✅ The HPA demo needs zero new external infra (no cert-manager in the Kind e2e).
+- ⚠️ Central PromQL evaluation ships raw series over the network; at 500 series/node × tens of nodes this is well within budget, and matcher pushdown already prunes. Revisit with pushdown aggregation only if benchmarks demand (roadmap item).
+- ⚠️ Registry self-scrape quantizes ingest to 1 s and re-appends unchanged series each tick; tsdb dedups identical consecutive samples cheaply. Acceptable at target cardinality (§2.3 sizing).
+- ⚠️ An unverified aggregated API backend is a known, bounded v0.5 gap, closed by the v0.6 TLS work.
+
+**Rejected alternatives.**
+
+- *Raw `head.NewHead` per storage-and-query.md §2.1.* Re-implements compaction/retention/WAL-replay orchestration tsdb already ships; the "no historical blocks" goal is a retention setting, not an architecture.
+- *Per-node partial aggregation per §5.1.* Correct only for a decomposable subset of PromQL; the failure mode (silently wrong numbers feeding an autoscaler) is the worst kind.
+- *Agent discovery via the controller's `AgentSession` registry.* Couples the read path to control-plane liveness and leader election; DNS needs neither.
+- *`kubernetes-sigs/custom-metrics-apiserver`.* Correct long-term candidate, but drags the full apiserver library set into a repo that has stayed lean, for one read-only demo path.
+
+**Implemented in.** v0.5 phase PRs (`v0.5/phase-0-design` through `v0.5/phase-3-hpa`).
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.
