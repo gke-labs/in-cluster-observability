@@ -22,8 +22,8 @@ Milestones are tracked at [github.com/gke-labs/in-cluster-observability/mileston
 docker build -t ollie:v0.3 -f images/ollie/Dockerfile .
 kind create cluster --name ollie-v03
 kind load docker-image --name ollie-v03 ollie:v0.3
-docker pull otel/ebpf-instrument:v0.9.0
-kind load docker-image --name ollie-v03 otel/ebpf-instrument:v0.9.0
+docker pull otel/ebpf-instrument:v0.10.0
+kind load docker-image --name ollie-v03 otel/ebpf-instrument:v0.10.0
 kubectl apply -k k8s/
 ```
 

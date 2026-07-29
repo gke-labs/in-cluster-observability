@@ -70,7 +70,7 @@ spec:
           # Pinned per ADR-0010 / ADR-0018 (image tag, not Go module).
           # Upstream OBI publishes to Docker Hub at otel/ebpf-instrument,
           # not GHCR.
-          image: otel/ebpf-instrument:v0.9.0
+          image: otel/ebpf-instrument:v0.10.0
           env:
             # OBI v0.9 reads its YAML config from this env var, NOT a
             # CLI flag. Earlier iterations of this manifest passed
@@ -139,14 +139,15 @@ spec:
                 - CHECKPOINT_RESTORE # open target ELF files (uprobe attach)
                 - DAC_READ_SEARCH    # bypass DAC on /proc/<pid>/exe
                                      # and mounted container roots
-                - SYS_ADMIN          # empirically REQUIRED by OBI
-                                     # v0.9.0's L7 uprobe path: a #155
-                                     # drop attempt left L4 flowing but
-                                     # killed HTTP capture (go.Tracer
-                                     # logs "Kernel in lockdown mode or
-                                     # missing CAP_SYS_ADMIN"; verified
-                                     # by tests/e2e). Re-attempt the
-                                     # drop on each OBI bump (#152).
+                - SYS_ADMIN          # empirically REQUIRED by OBI's
+                                     # L7 uprobe path: drop attempts
+                                     # left L4 flowing but killed HTTP
+                                     # capture (go.Tracer: "Kernel in
+                                     # lockdown mode or missing
+                                     # CAP_SYS_ADMIN"). Verified by
+                                     # tests/e2e on v0.9.0 (#155) and
+                                     # again on v0.10.0 (#152).
+                                     # Re-attempt on each OBI bump.
               drop:
                 - ALL
             readOnlyRootFilesystem: true

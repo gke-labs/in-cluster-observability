@@ -19,7 +19,7 @@ obi_network_flow_bytes{
   k8s_src_namespace="...", k8s_src_owner_name="...", k8s_src_owner_type="Deployment|StatefulSet|...",
   k8s_dst_namespace="...", k8s_dst_owner_name="...", k8s_dst_owner_type="...",
   host_id="...",
-  obi_version="v0.9.0",
+  obi_version="v0.10.0",
 } <bytes>
 ```
 

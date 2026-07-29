@@ -30,11 +30,11 @@ The default single-node cluster is enough. Multi-node works too — the agent is
 docker build -t ollie:v0.3 -f images/ollie/Dockerfile .
 
 # Pull and load OBI v0.9 (the eBPF data plane).
-docker pull otel/ebpf-instrument:v0.9.0
+docker pull otel/ebpf-instrument:v0.10.0
 
 # Load both into the Kind cluster's node-local image store.
 kind load docker-image --name ollie-v03 ollie:v0.3
-kind load docker-image --name ollie-v03 otel/ebpf-instrument:v0.9.0
+kind load docker-image --name ollie-v03 otel/ebpf-instrument:v0.10.0
 ```
 
 On a real cluster, push to your registry instead (`docker push <registry>/ollie:v0.3`) and skip the `kind load` step.
@@ -50,7 +50,7 @@ This installs:
 - Namespace `ollie-system`.
 - ServiceAccount + ClusterRole + ClusterRoleBinding granting `list,watch` on `pods`, `services`, `nodes`, and `replicasets` — required so OBI's K8s metadata informer can attach `k8s.*` attributes to captured events.
 - DaemonSet `ollie-agent` with two containers:
-  - `obi` — the upstream `otel/ebpf-instrument:v0.9.0` image, privileged with the eBPF capability set, doing the actual eBPF capture.
+  - `obi` — the upstream `otel/ebpf-instrument:v0.10.0` image, privileged with the eBPF capability set, doing the actual eBPF capture.
   - `agent` — our image, unprivileged, exposing the Prometheus scrape on `:9090`.
 
 ## 4. Pin images on Kind
@@ -60,7 +60,7 @@ On Kind, locally loaded images won't be re-pulled, so the DaemonSet needs `image
 ```sh
 kubectl patch -n ollie-system daemonset/ollie-agent --type=strategic -p='{
   "spec":{"template":{"spec":{"containers":[
-    {"name":"obi",   "image":"otel/ebpf-instrument:v0.9.0", "imagePullPolicy":"IfNotPresent"},
+    {"name":"obi",   "image":"otel/ebpf-instrument:v0.10.0", "imagePullPolicy":"IfNotPresent"},
     {"name":"agent", "image":"ollie:v0.3",                   "imagePullPolicy":"IfNotPresent"}
   ]}}}
 }'
