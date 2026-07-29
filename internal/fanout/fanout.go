@@ -285,7 +285,24 @@ func (q *Queryable) Querier(mint, maxt int64) (storage.Querier, error) {
 			logger: q.logger,
 		})
 	}
-	return storage.NewMergeQuerier(queriers, nil, storage.ChainedSeriesMerge), nil
+	// Every agent is a SECONDARY querier, not a primary. This is the
+	// load-bearing availability choice (storage-and-query.md §5.3):
+	//
+	//   - Primaries Select sequentially and a Select error aborts the
+	//     whole query; secondaries Select CONCURRENTLY (the merge
+	//     querier only parallelises when len(secondaries) > 0) and a
+	//     first-iteration error is converted to a warning, not a
+	//     failure. Serial fan-out over N agents also stacked N per-
+	//     agent deadlines back-to-back; concurrent fan-out spends one.
+	//
+	// Prometheus's secondary handling only downgrades errors seen on
+	// the FIRST Next(); a STREAMED_XOR_CHUNKS drain that fails mid-
+	// stream (a deadline firing, an agent dying after headers) still
+	// propagates through SeriesSet.Err() and would abort the query.
+	// agentSeriesSet closes that gap by swallowing terminal Err() and
+	// recording the miss, so a mid-drain agent failure degrades the
+	// result instead of failing it.
+	return storage.NewMergeQuerier(nil, queriers, storage.ChainedSeriesMerge), nil
 }
 
 // agentQuerier reads one agent's series over remote read.
@@ -323,8 +340,15 @@ func (aq *agentQuerier) Select(ctx context.Context, sortSeries bool, hints *stor
 	// The merged set is drained within the query's lifetime; the
 	// engine cancels the parent ctx when evaluation ends, so leaking
 	// cancel to that point is acceptable — but tie it to iteration
-	// completion instead.
-	return &cancelingSeriesSet{SeriesSet: ss, cancel: cancel}
+	// completion instead. The set also swallows a terminal drain error
+	// (deadline, mid-stream agent death) into a recorded miss.
+	return &agentSeriesSet{
+		SeriesSet: ss,
+		cancel:    cancel,
+		addr:      aq.addr,
+		stats:     statsFrom(ctx),
+		logger:    aq.logger,
+	}
 }
 
 func (aq *agentQuerier) LabelValues(context.Context, string, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
@@ -337,19 +361,48 @@ func (aq *agentQuerier) LabelNames(context.Context, *storage.LabelHints, ...*lab
 
 func (aq *agentQuerier) Close() error { return nil }
 
-// cancelingSeriesSet releases the per-agent deadline context once the
-// set is exhausted.
-type cancelingSeriesSet struct {
+// agentSeriesSet wraps one agent's remote-read result. It releases the
+// per-agent deadline context once the set is exhausted, and — crucially
+// for availability — converts a terminal drain error into a recorded
+// miss so a mid-stream agent failure degrades the query rather than
+// aborting it (Prometheus's secondary-querier error tolerance only
+// covers the first Next(); STREAMED_XOR_CHUNKS failures surface later,
+// via Err()).
+type agentSeriesSet struct {
 	storage.SeriesSet
 	cancel context.CancelFunc
+	addr   string
+	stats  *Stats
+	logger *slog.Logger
 	done   bool
 }
 
-func (c *cancelingSeriesSet) Next() bool {
+func (c *agentSeriesSet) Next() bool {
 	ok := c.SeriesSet.Next()
 	if !ok && !c.done {
 		c.done = true
 		c.cancel()
 	}
 	return ok
+}
+
+// Err swallows a terminal drain error: the partial series already
+// yielded are kept, the agent is recorded as missed (degraded=true +
+// missingNodes), and nil is returned so the merge querier does not
+// abort the whole fan-out on one agent's mid-stream failure.
+func (c *agentSeriesSet) Err() error {
+	if err := c.SeriesSet.Err(); err != nil {
+		if !c.done {
+			c.done = true
+			c.cancel()
+		}
+		if c.logger != nil {
+			c.logger.Warn("fanout: agent stream failed mid-drain; continuing degraded", "addr", c.addr, "err", err)
+		}
+		if c.stats != nil {
+			c.stats.miss(c.addr)
+		}
+		return nil
+	}
+	return nil
 }

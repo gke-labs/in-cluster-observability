@@ -15,6 +15,7 @@
 package fanout
 
 import (
+	"errors"
 	"log/slog"
 	"net/http/httptest"
 	"testing"
@@ -23,7 +24,9 @@ import (
 	promcfg "github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
+	"github.com/prometheus/prometheus/util/annotations"
 
 	"github.com/gke-labs/in-cluster-observability/internal/store"
 )
@@ -156,6 +159,77 @@ func TestFanoutDegraded(t *testing.T) {
 	missing := stats.Missing()
 	if len(missing) != 1 || missing[0] != deadAddr {
 		t.Fatalf("missing = %v, want [%s]", missing, deadAddr)
+	}
+}
+
+// fakeSeriesSet yields n series, then reports err from Err(). Models a
+// STREAMED_XOR_CHUNKS remote read that opens cleanly (Read returns at
+// headers) but fails mid-drain — the failure mode Prometheus's
+// secondary-querier error tolerance does NOT cover, since it only
+// downgrades errors seen on the first Next().
+type fakeSeriesSet struct {
+	n   int
+	err error
+}
+
+func (s *fakeSeriesSet) Next() bool {
+	if s.n > 0 {
+		s.n--
+		return true
+	}
+	return false
+}
+func (s *fakeSeriesSet) At() storage.Series                { return nil }
+func (s *fakeSeriesSet) Err() error                        { return s.err }
+func (s *fakeSeriesSet) Warnings() annotations.Annotations { return nil }
+
+// TestAgentSeriesSetSwallowsMidStreamError verifies a mid-drain agent
+// failure degrades the fan-out (recorded miss, nil error) rather than
+// aborting the whole query, and releases the per-agent deadline context.
+func TestAgentSeriesSetSwallowsMidStreamError(t *testing.T) {
+	stats := &Stats{}
+	canceled := false
+	ss := &agentSeriesSet{
+		SeriesSet: &fakeSeriesSet{n: 2, err: errors.New("stream reset mid-chunk")},
+		cancel:    func() { canceled = true },
+		addr:      "10.0.0.9:9091",
+		stats:     stats,
+		logger:    slog.Default(),
+	}
+	for ss.Next() {
+	}
+	if err := ss.Err(); err != nil {
+		t.Fatalf("terminal error must be swallowed, got %v", err)
+	}
+	if !stats.Degraded() {
+		t.Fatal("expected the failed agent to be recorded as a miss")
+	}
+	if m := stats.Missing(); len(m) != 1 || m[0] != "10.0.0.9:9091" {
+		t.Fatalf("missing = %v, want [10.0.0.9:9091]", m)
+	}
+	if !canceled {
+		t.Fatal("per-agent deadline context was not released")
+	}
+}
+
+// TestAgentSeriesSetCleanDrain confirms a healthy stream records no
+// miss and reports no error.
+func TestAgentSeriesSetCleanDrain(t *testing.T) {
+	stats := &Stats{}
+	ss := &agentSeriesSet{
+		SeriesSet: &fakeSeriesSet{n: 3},
+		cancel:    func() {},
+		addr:      "10.0.0.1:9091",
+		stats:     stats,
+		logger:    slog.Default(),
+	}
+	for ss.Next() {
+	}
+	if err := ss.Err(); err != nil {
+		t.Fatalf("clean drain must not error, got %v", err)
+	}
+	if stats.Degraded() {
+		t.Fatalf("clean drain must not record a miss: %v", stats.Missing())
 	}
 }
 
