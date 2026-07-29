@@ -45,9 +45,15 @@ func TranslateMetrics(rms []*metricspb.ResourceMetrics) []Event {
 						Timestamp: now,
 						Module:    module,
 						Metric: &MetricEvent{
-							Name:       m.GetName(),
-							Value:      dp.value,
-							Attributes: attrs,
+							Name:         m.GetName(),
+							Value:        dp.value,
+							Attributes:   attrs,
+							Type:         dp.typ,
+							Temporality:  dp.temporality,
+							Monotonic:    dp.monotonic,
+							Count:        dp.count,
+							Bounds:       dp.bounds,
+							BucketCounts: dp.bucketCounts,
 						},
 					})
 				}
@@ -74,33 +80,68 @@ func classifyMetric(name string) Module {
 
 // dp is the union shape for OTLP number datapoints. We flatten Sum,
 // Gauge, and Histogram datapoints into this so the translator stays
-// linear regardless of metric type.
+// linear regardless of metric type. Type, temporality, monotonicity,
+// and histogram buckets are carried through so consumers can re-emit
+// soundly (#153).
 type dp struct {
 	value float64
 	attrs []*commonpb.KeyValue
+
+	typ         MetricType
+	temporality Temporality
+	monotonic   bool
+
+	count        uint64
+	bounds       []float64
+	bucketCounts []uint64
+}
+
+func temporalityOf(t metricspb.AggregationTemporality) Temporality {
+	switch t {
+	case metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA:
+		return TemporalityDelta
+	case metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE:
+		return TemporalityCumulative
+	default:
+		return TemporalityUnspecified
+	}
 }
 
 func datapointsOf(m *metricspb.Metric) []dp {
 	switch d := m.GetData().(type) {
 	case *metricspb.Metric_Sum:
+		temp := temporalityOf(d.Sum.GetAggregationTemporality())
+		mono := d.Sum.GetIsMonotonic()
 		out := make([]dp, 0, len(d.Sum.GetDataPoints()))
 		for _, p := range d.Sum.GetDataPoints() {
-			out = append(out, dp{value: numberValue(p), attrs: p.GetAttributes()})
+			out = append(out, dp{
+				value: numberValue(p), attrs: p.GetAttributes(),
+				typ: MetricTypeSum, temporality: temp, monotonic: mono,
+			})
 		}
 		return out
 	case *metricspb.Metric_Gauge:
 		out := make([]dp, 0, len(d.Gauge.GetDataPoints()))
 		for _, p := range d.Gauge.GetDataPoints() {
-			out = append(out, dp{value: numberValue(p), attrs: p.GetAttributes()})
+			out = append(out, dp{
+				value: numberValue(p), attrs: p.GetAttributes(),
+				typ: MetricTypeGauge,
+			})
 		}
 		return out
 	case *metricspb.Metric_Histogram:
+		temp := temporalityOf(d.Histogram.GetAggregationTemporality())
 		out := make([]dp, 0, len(d.Histogram.GetDataPoints()))
 		for _, p := range d.Histogram.GetDataPoints() {
-			// For a histogram datapoint, surface the sum as the value
-			// (mean derivable from count + sum at query time). v0.3
-			// will surface buckets separately when we have a store.
-			out = append(out, dp{value: p.GetSum(), attrs: p.GetAttributes()})
+			// Value carries the sum; count + explicit buckets ride
+			// alongside so downstream can rebuild the full histogram.
+			out = append(out, dp{
+				value: p.GetSum(), attrs: p.GetAttributes(),
+				typ: MetricTypeHistogram, temporality: temp,
+				count:        p.GetCount(),
+				bounds:       p.GetExplicitBounds(),
+				bucketCounts: p.GetBucketCounts(),
+			})
 		}
 		return out
 	}

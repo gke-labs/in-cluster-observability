@@ -284,6 +284,31 @@ type Event struct {
 	Edge   *EdgeEvent
 }
 
+// MetricType identifies the OTLP data shape a MetricEvent came from.
+//
+// Stability: Experimental
+type MetricType uint8
+
+const (
+	MetricTypeUnspecified MetricType = iota
+	MetricTypeSum
+	MetricTypeGauge
+	MetricTypeHistogram
+)
+
+// Temporality mirrors OTLP aggregation temporality. Consumers MUST
+// honor it: a cumulative Sum re-reports its running total every
+// export interval — adding those totals up inflates counters (#153).
+//
+// Stability: Experimental
+type Temporality uint8
+
+const (
+	TemporalityUnspecified Temporality = iota
+	TemporalityDelta
+	TemporalityCumulative
+)
+
 // MetricEvent carries a single translated metric datapoint from OBI.
 // Per ADR-0017.5, v0.2 carries the minimal field set; richer attributes
 // (e.g. k8s.* resource attrs after enrichment) land in v0.3.
@@ -294,14 +319,32 @@ type MetricEvent struct {
 	// Per ADR-0021 the translator passes names through unchanged; no
 	// `ollie_*` prefix rewrite.
 	Name string
-	// Value is the datapoint's value at the report time (counters
-	// arrive as deltas / sums per OBI's aggregation; this field carries
-	// the raw value reported).
+	// Value is the datapoint's value at the report time. For Sum and
+	// Gauge points this is the reported number; for Histogram points
+	// it is the histogram sum (buckets are carried separately below).
 	Value float64
 	// Attributes is the merged set of resource + datapoint attributes.
 	// Per ADR-0021 OBI is the source of K8s identity, so k8s.* /
 	// service.* attrs flow through unchanged for downstream re-emission.
 	Attributes map[string]string
+
+	// Type is the OTLP data shape this point came from (#153).
+	Type MetricType
+	// Temporality is the OTLP aggregation temporality of Sum and
+	// Histogram points; TemporalityUnspecified for gauges. Consumers
+	// must treat unspecified as cumulative (the OTLP default).
+	Temporality Temporality
+	// Monotonic is the OTLP is_monotonic flag on Sum points. A
+	// non-monotonic sum is gauge-shaped for Prometheus purposes.
+	Monotonic bool
+
+	// Histogram payload (Type == MetricTypeHistogram only). Bounds are
+	// the explicit bucket upper bounds; BucketCounts has len(Bounds)+1
+	// entries, the last being the overflow (+Inf) bucket, both exactly
+	// as OTLP carries them (per-bucket counts, not cumulative).
+	Count        uint64
+	Bounds       []float64
+	BucketCounts []uint64
 }
 
 // SpanEvent carries a single translated OTel-shaped span from OBI's
