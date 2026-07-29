@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -73,5 +74,61 @@ func TestCaptureSmokeHTTP(t *testing.T) {
 				}
 			}
 			return false
+		})
+}
+
+// TestQueryFanout is the #94/#95 end-to-end gate: the query server
+// discovers the agent through the headless Service, fans a PromQL
+// query out to the agent's remote-read endpoint, and returns
+// cluster-aggregated results over the Prometheus-compatible HTTP
+// API. Kind runs one node, so "cluster total" degenerates to one
+// agent's data — the multi-agent aggregation and degraded semantics
+// are covered by internal/fanout's in-process tests; this asserts
+// the deployed wiring (DNS discovery, token auth agent-side,
+// remote-read transport, API surface).
+func TestQueryFanout(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, "ollie-e2e")
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+	h.DeployTestWorkload()
+
+	// port-forward terminates on the pod loopback, which --api-auth
+	// exempts by design; in-cluster consumers need a token bound to
+	// ollie-promql-reader.
+	base := h.PortForward("deploy/ollie-query", "ollie-system", 19095, 9095)
+
+	// The store self-scrapes every second, so ollie_agent_up reaches
+	// the tsdb within seconds of agent boot; sum() proves engine +
+	// fan-out + merge, not just passthrough.
+	h.PollHTTP(base+`/api/v1/query?query=sum(ollie_agent_up)`, 2*time.Minute,
+		"query server returns sum(ollie_agent_up) ≥ 1",
+		func(body string) bool {
+			return strings.Contains(body, `"status":"success"`) &&
+				strings.Contains(body, `"resultType":"vector"`) &&
+				strings.Contains(body, `"value":[`) &&
+				!strings.Contains(body, `"result":[]`)
+		})
+
+	// An OBI-captured, K8s-attributed L7 series is queryable through
+	// the full path: OBI -> agent forwarder -> registry self-scrape
+	// -> tsdb -> remote read -> fan-out -> PromQL.
+	obiQuery := url.QueryEscape(
+		`sum(rate({__name__=~"http_server_request_duration.*_count",k8s_namespace_name="default"}[1m]))`)
+	h.PollHTTP(base+"/api/v1/query?query="+obiQuery,
+		3*time.Minute,
+		"query server aggregates OBI HTTP series for the echo workload",
+		func(body string) bool {
+			return strings.Contains(body, `"status":"success"`) &&
+				!strings.Contains(body, `"result":[]`)
 		})
 }

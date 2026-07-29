@@ -336,6 +336,8 @@ func (h *Harness) InstallOllie(repoRoot string) {
 	h.KindLoad("ollie:e2e")
 	h.DockerBuild("ollie-controller:e2e", filepath.Join(repoRoot, "images/ollie-controller/Dockerfile"), repoRoot)
 	h.KindLoad("ollie-controller:e2e")
+	h.DockerBuild("ollie-query:e2e", filepath.Join(repoRoot, "images/ollie-query/Dockerfile"), repoRoot)
+	h.KindLoad("ollie-query:e2e")
 	h.PullAndLoad(PinnedOBIImage(h.t, repoRoot))
 
 	h.Kubectl("apply", "-k", filepath.Join(repoRoot, "k8s"))
@@ -343,8 +345,11 @@ func (h *Harness) InstallOllie(repoRoot string) {
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"agent","image":"ollie:e2e","imagePullPolicy":"Never"}]}}}}`)
 	h.Kubectl("patch", "deployment", "ollie-controller", "-n", "ollie-system", "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"controller","image":"ollie-controller:e2e","imagePullPolicy":"Never"}]}}}}`)
+	h.Kubectl("patch", "deployment", "ollie-query", "-n", "ollie-system", "--type=strategic",
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"query","image":"ollie-query:e2e","imagePullPolicy":"Never"}]}}}}`)
 	h.WaitRollout("daemonset", "ollie-agent", "ollie-system", 5*time.Minute)
 	h.WaitRollout("deployment", "ollie-controller", "ollie-system", 3*time.Minute)
+	h.WaitRollout("deployment", "ollie-query", "ollie-system", 3*time.Minute)
 }
 
 // DeployTestWorkload loads the agnhost image and starts the echo
