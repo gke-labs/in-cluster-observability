@@ -1,7 +1,7 @@
 # Recorded fixture provenance
 
-- OBI image: otel/ebpf-instrument:v0.9.0
-- Recorded: 2026-07-28
+- OBI image: otel/ebpf-instrument:v0.10.0
+- Recorded: 2026-07-29
 - Pipeline: TestRecordFixtures (go test ./tests/contract/obi -record) —
   stock k8s/ install on Kind, obi container's OTEL_EXPORTER_OTLP_ENDPOINT
   repointed at an in-test recorder on the host; agnhost echo workload on

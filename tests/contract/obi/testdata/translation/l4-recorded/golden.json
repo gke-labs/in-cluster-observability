@@ -4,19 +4,19 @@
     "module": "l4_tcp",
     "metric": {
       "name": "obi.network.flow.bytes",
-      "value": 40124,
+      "value": 22792,
       "attributes": {
         "direction": "unknown",
         "host.id": "redacted",
         "k8s.cluster.name": "",
-        "k8s.dst.namespace": "ollie-system",
-        "k8s.dst.owner.name": "ollie-agent",
-        "k8s.dst.owner.type": "DaemonSet",
-        "k8s.src.namespace": "kube-system",
-        "k8s.src.owner.name": "kube-dns",
-        "k8s.src.owner.type": "Service",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
+        "k8s.dst.namespace": "kube-system",
+        "k8s.dst.owner.name": "kube-dns",
+        "k8s.dst.owner.type": "Service",
+        "k8s.src.namespace": "ollie-system",
+        "k8s.src.owner.name": "ollie-agent",
+        "k8s.src.owner.type": "DaemonSet",
+        "obi.revision": "",
+        "obi.version": ""
       },
       "type": "sum",
       "temporality": "cumulative",
@@ -28,7 +28,7 @@
     "module": "l4_tcp",
     "metric": {
       "name": "obi.network.flow.bytes",
-      "value": 62011,
+      "value": 61362,
       "attributes": {
         "direction": "response",
         "host.id": "redacted",
@@ -39,8 +39,8 @@
         "k8s.src.namespace": "",
         "k8s.src.owner.name": "",
         "k8s.src.owner.type": "",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
+        "obi.revision": "",
+        "obi.version": ""
       },
       "type": "sum",
       "temporality": "cumulative",
@@ -63,32 +63,8 @@
         "k8s.src.namespace": "ollie-system",
         "k8s.src.owner.name": "ollie-agent",
         "k8s.src.owner.type": "DaemonSet",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
-      },
-      "type": "sum",
-      "temporality": "cumulative",
-      "monotonic": true
-    }
-  },
-  {
-    "kind": "metric",
-    "module": "l4_tcp",
-    "metric": {
-      "name": "obi.network.flow.bytes",
-      "value": 94056,
-      "attributes": {
-        "direction": "unknown",
-        "host.id": "redacted",
-        "k8s.cluster.name": "",
-        "k8s.dst.namespace": "ollie-system",
-        "k8s.dst.owner.name": "ollie-agent",
-        "k8s.dst.owner.type": "DaemonSet",
-        "k8s.src.namespace": "default",
-        "k8s.src.owner.name": "kubernetes",
-        "k8s.src.owner.type": "Service",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
+        "obi.revision": "",
+        "obi.version": ""
       },
       "type": "sum",
       "temporality": "cumulative",
@@ -111,8 +87,8 @@
         "k8s.src.namespace": "",
         "k8s.src.owner.name": "",
         "k8s.src.owner.type": "",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
+        "obi.revision": "",
+        "obi.version": ""
       },
       "type": "sum",
       "temporality": "cumulative",
@@ -124,19 +100,19 @@
     "module": "l4_tcp",
     "metric": {
       "name": "obi.network.flow.bytes",
-      "value": 22792,
+      "value": 1112,
       "attributes": {
-        "direction": "unknown",
+        "direction": "response",
         "host.id": "redacted",
         "k8s.cluster.name": "",
-        "k8s.dst.namespace": "kube-system",
-        "k8s.dst.owner.name": "kube-dns",
-        "k8s.dst.owner.type": "Service",
+        "k8s.dst.namespace": "",
+        "k8s.dst.owner.name": "",
+        "k8s.dst.owner.type": "",
         "k8s.src.namespace": "ollie-system",
         "k8s.src.owner.name": "ollie-agent",
         "k8s.src.owner.type": "DaemonSet",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
+        "obi.revision": "",
+        "obi.version": ""
       },
       "type": "sum",
       "temporality": "cumulative",
@@ -148,7 +124,7 @@
     "module": "l4_tcp",
     "metric": {
       "name": "obi.network.flow.bytes",
-      "value": 48723,
+      "value": 14826,
       "attributes": {
         "direction": "request",
         "host.id": "redacted",
@@ -159,8 +135,8 @@
         "k8s.src.namespace": "ollie-system",
         "k8s.src.owner.name": "ollie-agent",
         "k8s.src.owner.type": "DaemonSet",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
+        "obi.revision": "",
+        "obi.version": ""
       },
       "type": "sum",
       "temporality": "cumulative",
@@ -172,7 +148,31 @@
     "module": "l4_tcp",
     "metric": {
       "name": "obi.network.flow.bytes",
-      "value": 7656,
+      "value": 114179,
+      "attributes": {
+        "direction": "unknown",
+        "host.id": "redacted",
+        "k8s.cluster.name": "",
+        "k8s.dst.namespace": "ollie-system",
+        "k8s.dst.owner.name": "ollie-agent",
+        "k8s.dst.owner.type": "DaemonSet",
+        "k8s.src.namespace": "default",
+        "k8s.src.owner.name": "kubernetes",
+        "k8s.src.owner.type": "Service",
+        "obi.revision": "",
+        "obi.version": ""
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
+    }
+  },
+  {
+    "kind": "metric",
+    "module": "l4_tcp",
+    "metric": {
+      "name": "obi.network.flow.bytes",
+      "value": 10436,
       "attributes": {
         "direction": "unknown",
         "host.id": "redacted",
@@ -183,8 +183,56 @@
         "k8s.src.namespace": "ollie-system",
         "k8s.src.owner.name": "ollie-agent",
         "k8s.src.owner.type": "DaemonSet",
-        "obi.revision": "e92b0c2",
-        "obi.version": "v0.9.0"
+        "obi.revision": "",
+        "obi.version": ""
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
+    }
+  },
+  {
+    "kind": "metric",
+    "module": "l4_tcp",
+    "metric": {
+      "name": "obi.network.flow.bytes",
+      "value": 1904,
+      "attributes": {
+        "direction": "request",
+        "host.id": "redacted",
+        "k8s.cluster.name": "",
+        "k8s.dst.namespace": "ollie-system",
+        "k8s.dst.owner.name": "ollie-agent",
+        "k8s.dst.owner.type": "DaemonSet",
+        "k8s.src.namespace": "",
+        "k8s.src.owner.name": "",
+        "k8s.src.owner.type": "",
+        "obi.revision": "",
+        "obi.version": ""
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
+    }
+  },
+  {
+    "kind": "metric",
+    "module": "l4_tcp",
+    "metric": {
+      "name": "obi.network.flow.bytes",
+      "value": 40124,
+      "attributes": {
+        "direction": "unknown",
+        "host.id": "redacted",
+        "k8s.cluster.name": "",
+        "k8s.dst.namespace": "ollie-system",
+        "k8s.dst.owner.name": "ollie-agent",
+        "k8s.dst.owner.type": "DaemonSet",
+        "k8s.src.namespace": "kube-system",
+        "k8s.src.owner.name": "kube-dns",
+        "k8s.src.owner.type": "Service",
+        "obi.revision": "",
+        "obi.version": ""
       },
       "type": "sum",
       "temporality": "cumulative",
