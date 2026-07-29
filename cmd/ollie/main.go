@@ -90,7 +90,7 @@ func main() {
 	// translated metrics. The same Prometheus handler backs the
 	// production scrape listener on :9090 and the optional
 	// /debug/metrics on the loopback debug endpoint.
-	mp, promHandler, err := capture.NewPromMeterProvider()
+	mp, promReg, promHandler, err := capture.NewPromMeterProvider()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "prometheus exporter init failed: %v\n", err)
 		os.Exit(1)
@@ -189,7 +189,8 @@ func main() {
 	// Meter so OBI's translated metrics flow out via the same
 	// Prometheus exporter the scrape listener serves. SpanEvent /
 	// EdgeEvent are drained for now (v0.5 wires them into the store).
-	fwd := newMetricForwarder(mp.Meter("ollie/obi-forwarder"))
+	fwd := newOBICollector(mp.Meter("ollie/obi-forwarder"))
+	promReg.MustRegister(fwd)
 	go func() {
 		for ev := range mgr.Events() {
 			if ev.Kind == capture.EventMetric && ev.Metric != nil {
