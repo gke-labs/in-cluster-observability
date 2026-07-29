@@ -17,9 +17,16 @@
 #
 # TLS posture per ADR-0025 §7: ollie-query serves a startup-generated
 # self-signed certificate and the APIService sets
-# insecureSkipTLSVerify. The v0.6 TLS milestone replaces this with a
-# real CA bundle (cert-manager or CA injection); tracked there
-# deliberately rather than half-done here.
+# insecureSkipTLSVerify. The v0.6 TLS milestone replaces the SERVING
+# cert with a real CA bundle (cert-manager or CA injection); tracked
+# there deliberately rather than half-done here.
+#
+# CLIENT auth is not deferred: ollie-query requires the aggregation
+# layer's front-proxy (requestheader) client certificate on :6443
+# (--custom-metrics-client-auth=requestheader). Only the kube-apiserver
+# holds a cert signed by the cluster's requestheader CA, so no other pod
+# can read cluster-wide metrics off the port. The RoleBinding below lets
+# ollie-query read that CA from the API server's published ConfigMap.
 
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
@@ -69,6 +76,29 @@ subjects:
   - kind: ServiceAccount
     name: horizontal-pod-autoscaler
     namespace: kube-system
+---
+# ollie-query reads the requestheader CA bundle the API server publishes
+# in kube-system/extension-apiserver-authentication so it can pin the
+# :6443 listener's ClientCAs to the front-proxy CA (mTLS from the
+# aggregator). The built-in extension-apiserver-authentication-reader
+# Role grants exactly `get` on that one ConfigMap — the standard grant
+# aggregated API servers use.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ollie-query-auth-reader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: ollie-query
+    namespace: ollie-system
 ---
 # Operator-editable metric-path -> PromQL template mapping
 # (storage-and-query.md §7). ollie-query loads this file at startup;

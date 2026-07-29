@@ -43,6 +43,7 @@ import (
 
 	"github.com/gke-labs/in-cluster-observability/internal/custommetrics"
 	"github.com/gke-labs/in-cluster-observability/internal/fanout"
+	"github.com/gke-labs/in-cluster-observability/internal/frontproxy"
 	"github.com/gke-labs/in-cluster-observability/internal/queryapi"
 	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
 	"github.com/gke-labs/in-cluster-observability/internal/streamsvc"
@@ -69,6 +70,7 @@ func main() {
 	apiAuthAudiences := flag.String("api-auth-audiences", "", "comma-separated token audiences for --api-auth=token; empty accepts standard API-server-audience tokens")
 	tlsAddr := flag.String("tls-addr", "0.0.0.0:6443", "bind address for the HTTPS listener serving custom.metrics.k8s.io to the aggregation layer (#96). Serves a startup-generated self-signed cert; the APIService registers with insecureSkipTLSVerify per ADR-0025 §7 (real CA wiring is v0.6). Empty disables.")
 	tlsHostnames := flag.String("tls-hostnames", "ollie-query.ollie-system.svc,ollie-query.ollie-system.svc.cluster.local,localhost", "comma-separated DNS SANs for the self-signed serving cert")
+	cmClientAuth := flag.String("custom-metrics-client-auth", "auto", "authn for the :6443 custom-metrics listener. 'requestheader' requires a client certificate signed by the cluster's front-proxy (requestheader) CA — the identity the aggregation layer presents — so no unauthenticated pod can read cluster-wide metrics; the CA is loaded from kube-system/extension-apiserver-authentication (grant via the ollie-query SA's binding to extension-apiserver-authentication-reader). 'none' disables client-cert auth (dev/`go run` only; the port is then unauthenticated). 'auto' picks requestheader in-cluster, none otherwise.")
 	cmConfig := flag.String("custom-metrics-config", "/etc/ollie/custom-metrics/config.yaml", "path to the metric-path -> PromQL template config (ConfigMap-mounted; missing file falls back to built-in defaults)")
 	streamAddr := flag.String("stream-addr", "0.0.0.0:9096", "bind address for the cluster-wide gRPC StreamService (#99): CEL span subscriptions multiplexed across agents + periodic PromQL streams. Empty disables. Auth follows --api-auth (ollie-stream-reader ClusterRole; loopback exempt).")
 	agentStreamPort := flag.Int("agent-stream-port", 9092, "port of the agents' node-local StreamService")
@@ -189,11 +191,32 @@ func main() {
 			logger.Error("self-signed cert generation failed", "err", err)
 			os.Exit(1)
 		}
+		tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		cmHandler := http.Handler(cm.Routes())
+
+		// Require the aggregation layer's front-proxy client certificate
+		// (#96 auth hole): without it, any pod that can reach :6443 reads
+		// cluster-wide metrics unauthenticated. The kube-apiserver
+		// authenticates to aggregated backends with a requestheader-CA-
+		// signed client cert, so pinning ClientCAs to that CA admits only
+		// the aggregator at the TLS layer.
+		fp, err := customMetricsClientAuth(ctx, *cmClientAuth, logger)
+		if err != nil {
+			logger.Error("custom-metrics client auth init failed", "err", err)
+			os.Exit(1)
+		}
+		if fp != nil {
+			tlsConf.ClientCAs = fp.ClientCAs()
+			tlsConf.ClientAuth = tls.RequireAndVerifyClientCert
+			cmHandler = fp.Middleware(cmHandler)
+			logger.Info("custom-metrics client auth: requestheader (mTLS)", "allowed-names", fp.AllowedNames())
+		}
+
 		tlsSrv := &http.Server{
 			Addr:              *tlsAddr,
-			Handler:           cm.Routes(),
+			Handler:           cmHandler,
 			ReadHeaderTimeout: 5 * time.Second,
-			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+			TLSConfig:         tlsConf,
 		}
 		go func() {
 			if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
@@ -273,6 +296,39 @@ func buildAPIHandler(api *queryapi.API, mode, audiences string, logger *slog.Log
 		return mux, nil
 	default:
 		return nil, fmt.Errorf("unknown --api-auth mode %q (want auto|token|none)", mode)
+	}
+}
+
+// customMetricsClientAuth resolves the --custom-metrics-client-auth
+// mode into a front-proxy authenticator for the :6443 listener, or nil
+// when auth is disabled. Mode "auto" resolves to "requestheader"
+// in-cluster (where the aggregator and the requestheader CA exist) and
+// "none" otherwise.
+func customMetricsClientAuth(ctx context.Context, mode string, logger *slog.Logger) (*frontproxy.Authenticator, error) {
+	if mode == "auto" {
+		if _, err := rest.InClusterConfig(); err == nil {
+			mode = "requestheader"
+		} else {
+			mode = "none"
+		}
+		logger.Info("custom-metrics client auth: auto resolved", "mode", mode)
+	}
+	switch mode {
+	case "none":
+		logger.Warn("custom-metrics client auth: DISABLED — :6443 serves cluster-wide metrics unauthenticated (dev only)")
+		return nil, nil
+	case "requestheader":
+		cfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("--custom-metrics-client-auth=requestheader requires in-cluster credentials: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("building clientset: %w", err)
+		}
+		return frontproxy.Load(ctx, client)
+	default:
+		return nil, fmt.Errorf("unknown --custom-metrics-client-auth mode %q (want auto|requestheader|none)", mode)
 	}
 }
 
