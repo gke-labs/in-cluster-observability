@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -65,17 +66,33 @@ func NewHarness(t *testing.T, clusterName string) *Harness {
 		h.Run("kind", "create", "cluster", "--name", clusterName, "--wait", "2m")
 	}
 
-	t.Cleanup(func() {
-		if os.Getenv("KEEP_CLUSTER") != "" {
-			t.Logf("KEEP_CLUSTER set; leaving kind cluster %q running", clusterName)
-			return
-		}
-		t.Logf("deleting kind cluster %q", clusterName)
-		if out, err := exec.Command("kind", "delete", "cluster", "--name", clusterName).CombinedOutput(); err != nil {
-			t.Logf("kind delete cluster failed: %v\n%s", err, out)
-		}
-	})
+	// Teardown is owned by TestMain: the cluster (and the install
+	// inside it) is shared across the whole suite run so the 6-test
+	// e2e fits go test's 20m budget — per-test create+install cost
+	// ~3-4 min each and blew it. KEEP_CLUSTER still leaves it up.
 	return h
+}
+
+// TestMain deletes the shared cluster once the whole suite is done.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if os.Getenv("RUN_E2E") != "" && os.Getenv("KEEP_CLUSTER") == "" {
+		_ = exec.Command("kind", "delete", "cluster", "--name", sharedClusterName).Run()
+	}
+	os.Exit(code)
+}
+
+// sharedClusterName is the one cluster every e2e test shares.
+const sharedClusterName = "ollie-e2e"
+
+// installState makes InstallOllie / DeployTestWorkload once-per-run:
+// later tests reuse the deployed stack instead of re-building and
+// re-rolling it. A failed install fails every subsequent test fast.
+var installState struct {
+	sync.Mutex
+	installed bool
+	deployed  bool
+	failed    string
 }
 
 // clusterAlive reports whether the named cluster's API server
@@ -397,6 +414,16 @@ spec:
 // fixture recorder.
 func (h *Harness) InstallOllie(repoRoot string) {
 	h.t.Helper()
+	installState.Lock()
+	defer installState.Unlock()
+	if installState.failed != "" {
+		h.t.Fatalf("skipping: earlier install failed: %s", installState.failed)
+	}
+	if installState.installed {
+		h.t.Log("ollie already installed in the shared cluster; reusing")
+		return
+	}
+	installState.failed = "InstallOllie did not complete"
 	h.DockerBuild("ollie:e2e", filepath.Join(repoRoot, "images/ollie/Dockerfile"), repoRoot)
 	h.KindLoad("ollie:e2e")
 	h.DockerBuild("ollie-controller:e2e", filepath.Join(repoRoot, "images/ollie-controller/Dockerfile"), repoRoot)
@@ -424,16 +451,25 @@ func (h *Harness) InstallOllie(repoRoot string) {
 	h.WaitRollout("daemonset", "ollie-agent", "ollie-system", 5*time.Minute)
 	h.WaitRollout("deployment", "ollie-controller", "ollie-system", 3*time.Minute)
 	h.WaitRollout("deployment", "ollie-query", "ollie-system", 3*time.Minute)
+	installState.installed = true
+	installState.failed = ""
 }
 
 // DeployTestWorkload loads the agnhost image and starts the echo
 // server + traffic client.
 func (h *Harness) DeployTestWorkload() {
 	h.t.Helper()
+	installState.Lock()
+	defer installState.Unlock()
+	if installState.deployed {
+		h.t.Log("test workload already deployed in the shared cluster; reusing")
+		return
+	}
 	h.PullAndLoad(AgnhostImage)
 	h.ApplyStdin(TestWorkloadManifest())
 	h.WaitRollout("deployment", "echo", "default", 2*time.Minute)
 	h.WaitRollout("deployment", "traffic-client", "default", 2*time.Minute)
+	installState.deployed = true
 }
 
 // saveArtifact writes content under $ARTIFACTS (the path CI uploads) or

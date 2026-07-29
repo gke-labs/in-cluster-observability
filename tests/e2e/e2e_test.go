@@ -317,7 +317,11 @@ spec:
 		func() (string, error) {
 			return h.KubectlOutput("logs", "-n", "default", "deploy/otel-collector", "--tail=200")
 		},
-		func(out string) bool { return strings.Contains(out, "spans") })
+		func(out string) bool {
+			// verbosity-dependent: summary lines carry "spans", the
+			// detailed form logs one attribute line per span.
+			return strings.Contains(out, "spans") || strings.Contains(out, "http.request.method")
+		})
 
 	// Kill the collector: the relay degrades to accounted drops and
 	// the agent stays alive (#97 acceptance).
