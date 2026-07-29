@@ -32,10 +32,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -43,6 +45,8 @@ import (
 	"github.com/gke-labs/in-cluster-observability/internal/fanout"
 	"github.com/gke-labs/in-cluster-observability/internal/queryapi"
 	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
+	"github.com/gke-labs/in-cluster-observability/internal/streamsvc"
+	streamv1 "github.com/gke-labs/in-cluster-observability/pkg/stream/pb/stream/v1"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -66,6 +70,8 @@ func main() {
 	tlsAddr := flag.String("tls-addr", "0.0.0.0:6443", "bind address for the HTTPS listener serving custom.metrics.k8s.io to the aggregation layer (#96). Serves a startup-generated self-signed cert; the APIService registers with insecureSkipTLSVerify per ADR-0025 §7 (real CA wiring is v0.6). Empty disables.")
 	tlsHostnames := flag.String("tls-hostnames", "ollie-query.ollie-system.svc,ollie-query.ollie-system.svc.cluster.local,localhost", "comma-separated DNS SANs for the self-signed serving cert")
 	cmConfig := flag.String("custom-metrics-config", "/etc/ollie/custom-metrics/config.yaml", "path to the metric-path -> PromQL template config (ConfigMap-mounted; missing file falls back to built-in defaults)")
+	streamAddr := flag.String("stream-addr", "0.0.0.0:9096", "bind address for the cluster-wide gRPC StreamService (#99): CEL span subscriptions multiplexed across agents + periodic PromQL streams. Empty disables. Auth follows --api-auth (ollie-stream-reader ClusterRole; loopback exempt).")
+	agentStreamPort := flag.Int("agent-stream-port", 9092, "port of the agents' node-local StreamService")
 	flag.Parse()
 
 	if *versionOnly {
@@ -119,6 +125,51 @@ func main() {
 	if err != nil {
 		logger.Error("api auth init failed", "err", err)
 		os.Exit(1)
+	}
+
+	// Cluster-wide stream service (#99): span subscriptions fan out
+	// to the agents' node-local stream ports; metric streams are
+	// periodic evaluations over the same fan-out queryable.
+	if *streamAddr != "" {
+		streamDisc := &portRewriter{disc: disc, port: *agentStreamPort}
+		qs := &streamsvc.QueryServer{
+			Agents: streamDisc,
+			Eval:   api,
+			BearerToken: func() string {
+				if tf == "" {
+					return ""
+				}
+				raw, err := os.ReadFile(tf)
+				if err != nil {
+					return ""
+				}
+				return strings.TrimSpace(string(raw))
+			},
+			Logger: logger,
+		}
+		var opts []grpc.ServerOption
+		mw, err := buildStreamAuth(*apiAuth, *apiAuthAudiences, logger)
+		if err != nil {
+			logger.Error("stream auth init failed", "err", err)
+			os.Exit(1)
+		}
+		if mw != nil {
+			opts = append(opts, grpc.StreamInterceptor(mw.StreamInterceptor()))
+		}
+		gs := grpc.NewServer(opts...)
+		streamv1.RegisterStreamServiceServer(gs, qs)
+		sl, err := net.Listen("tcp", *streamAddr)
+		if err != nil {
+			logger.Error("stream listen failed", "addr", *streamAddr, "err", err)
+			os.Exit(1)
+		}
+		go func() {
+			if err := gs.Serve(sl); err != nil {
+				logger.Error("stream server failed", "err", err)
+			}
+		}()
+		defer gs.GracefulStop()
+		logger.Info("stream service listening", "addr", sl.Addr().String())
 	}
 
 	// custom.metrics.k8s.io for the HPA (#96), on its own HTTPS
@@ -222,5 +273,58 @@ func buildAPIHandler(api *queryapi.API, mode, audiences string, logger *slog.Log
 		return mux, nil
 	default:
 		return nil, fmt.Errorf("unknown --api-auth mode %q (want auto|token|none)", mode)
+	}
+}
+
+// portRewriter presents the fan-out discoverer's endpoints with the
+// agents' stream port substituted for the remote-read port.
+type portRewriter struct {
+	disc *fanout.Discoverer
+	port int
+}
+
+func (p *portRewriter) Addrs() []string {
+	in := p.disc.Addrs()
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		host, _, err := net.SplitHostPort(a)
+		if err != nil {
+			continue
+		}
+		out = append(out, net.JoinHostPort(host, strconv.Itoa(p.port)))
+	}
+	return out
+}
+
+// buildStreamAuth mirrors buildAPIHandler's mode resolution for the
+// gRPC stream listener; nil means auth disabled.
+func buildStreamAuth(mode, audiences string, logger *slog.Logger) (*scrapeauth.Middleware, error) {
+	if mode == "auto" {
+		if _, err := rest.InClusterConfig(); err == nil {
+			mode = "token"
+		} else {
+			mode = "none"
+		}
+	}
+	switch mode {
+	case "none":
+		logger.Warn("stream auth: DISABLED")
+		return nil, nil
+	case "token":
+		cfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("stream auth requires in-cluster credentials: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		var auds []string
+		if audiences != "" {
+			auds = strings.Split(audiences, ",")
+		}
+		return scrapeauth.New(scrapeauth.Config{Client: client, Audiences: auds, ExemptLoopback: true}), nil
+	default:
+		return nil, fmt.Errorf("unknown auth mode %q", mode)
 	}
 }

@@ -36,6 +36,7 @@
 package scrapeauth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net"
@@ -121,37 +122,46 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		key := cacheKey(token, r.URL.Path)
-		if status, ok := m.cached(key); ok {
-			if status == http.StatusOK {
-				next.ServeHTTP(w, r)
-				return
-			}
-			http.Error(w, http.StatusText(status), status)
-			return
-		}
-
-		status := m.review(r, token)
+		status := m.Authorize(r.Context(), token, r.URL.Path, strings.ToLower(r.Method))
 		switch status {
 		case http.StatusOK:
-			m.store(key, status, m.cfg.AllowedTTL)
 			next.ServeHTTP(w, r)
 		case http.StatusInternalServerError:
-			// API-server hiccup: fail closed but don't cache, the
-			// next scrape should retry the review.
 			http.Error(w, "authentication unavailable", status)
 		default:
-			m.store(key, status, m.cfg.DeniedTTL)
 			http.Error(w, http.StatusText(status), status)
 		}
 	})
 }
 
+// Authorize runs the cached TokenReview + SubjectAccessReview
+// decision for (token, path, verb) and returns an HTTP-shaped
+// status: 200 allowed, 401/403 denied (cached), 500 review
+// infrastructure failure (fail closed, not cached). Shared by the
+// HTTP middleware and the gRPC interceptor.
+func (m *Middleware) Authorize(ctx context.Context, token, path, verb string) int {
+	key := cacheKey(token, path)
+	if status, ok := m.cached(key); ok {
+		return status
+	}
+	status := m.review(ctx, token, path, verb)
+	switch status {
+	case http.StatusOK:
+		m.store(key, status, m.cfg.AllowedTTL)
+	case http.StatusInternalServerError:
+		// API-server hiccup: fail closed but don't cache, the next
+		// request should retry the review.
+	default:
+		m.store(key, status, m.cfg.DeniedTTL)
+	}
+	return status
+}
+
 // review performs the uncached TokenReview + SubjectAccessReview
 // round-trips and maps the outcome to an HTTP status.
-func (m *Middleware) review(r *http.Request, token string) int {
+func (m *Middleware) review(ctx context.Context, token, path, verb string) int {
 	tr, err := m.cfg.Client.AuthenticationV1().TokenReviews().Create(
-		r.Context(),
+		ctx,
 		&authnv1.TokenReview{Spec: authnv1.TokenReviewSpec{
 			Token:     token,
 			Audiences: m.cfg.Audiences,
@@ -170,15 +180,15 @@ func (m *Middleware) review(r *http.Request, token string) int {
 		extra[k] = authzv1.ExtraValue(v)
 	}
 	sar, err := m.cfg.Client.AuthorizationV1().SubjectAccessReviews().Create(
-		r.Context(),
+		ctx,
 		&authzv1.SubjectAccessReview{Spec: authzv1.SubjectAccessReviewSpec{
 			User:   tr.Status.User.Username,
 			Groups: tr.Status.User.Groups,
 			UID:    tr.Status.User.UID,
 			Extra:  extra,
 			NonResourceAttributes: &authzv1.NonResourceAttributes{
-				Path: r.URL.Path,
-				Verb: strings.ToLower(r.Method),
+				Path: path,
+				Verb: verb,
 			},
 		}},
 		metav1.CreateOptions{},

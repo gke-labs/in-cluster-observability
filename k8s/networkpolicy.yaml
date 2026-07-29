@@ -89,6 +89,10 @@ spec:
       ports:
         - port: 9091
           protocol: TCP
+        # Node-local stream service (v0.5, #99), same trust shape
+        # as remote read: only query-server pods.
+        - port: 9092
+          protocol: TCP
 ---
 # Query server (v0.5, #94): default-deny ingress with :9095 open to
 # any source. Access control is the bearer-token layer
@@ -120,6 +124,12 @@ spec:
     # network layer.
     - ports:
         - port: 6443
+          protocol: TCP
+    # Streaming subscribers (v0.5, #99): like :9095, open at the
+    # network layer, gated by bearer-token auth
+    # (ollie-stream-reader).
+    - ports:
+        - port: 9096
           protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1

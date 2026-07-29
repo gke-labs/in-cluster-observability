@@ -43,6 +43,7 @@ import (
 	"github.com/prometheus/prometheus/storage/remote"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"google.golang.org/grpc"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -50,7 +51,9 @@ import (
 	"github.com/gke-labs/in-cluster-observability/internal/export"
 	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
 	"github.com/gke-labs/in-cluster-observability/internal/store"
+	"github.com/gke-labs/in-cluster-observability/internal/streamsvc"
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
+	streamv1 "github.com/gke-labs/in-cluster-observability/pkg/stream/pb/stream/v1"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -72,6 +75,7 @@ func main() {
 	storeDir := flag.String("store-dir", "/var/lib/ollie/tsdb", "data directory for the node-local metric store (tsdb blocks + WAL, per ADR-0025; the DaemonSet mounts an emptyDir here). Empty disables the store.")
 	queryAddr := flag.String("query-addr", "0.0.0.0:9091", "bind address for the Prometheus remote-read endpoint at /api/v1/read, serving the node-local store to the query server's fan-out (#95). Empty (or a disabled store) disables it. Auth follows --scrape-auth: token mode requires `post` on nonResourceURL /api/v1/read (granted to the query server's SA by the ollie-query-reader ClusterRole).")
 	spanRingCapacity := flag.Int("span-ring-capacity", 65536, "capacity of the in-memory span ring fed by OBI's raw trace stream (#84, ADR-0026 §5). 0 disables the ring.")
+	streamAddr := flag.String("stream-addr", "0.0.0.0:9092", "bind address for the gRPC StreamService (#99): node-local CEL-filtered span subscriptions consumed by the query server's cluster mux. Empty (or a disabled span ring) disables. Auth follows --scrape-auth: token mode requires `post` on the nonResourceURL method path (ollie-stream-reader ClusterRole); loopback exempt.")
 	exportOTLPEndpoint := flag.String("export-otlp-endpoint", "", "OTLP endpoint to relay captured telemetry to (#97/#98, ADR-0026 §6): host:port for grpc, base URL for http. The ORIGINAL payloads received from OBI are forwarded — no re-encoding. Empty disables. Delivery is at-most-once: bounded queue, drop-on-full, 3 attempts with backoff (ollie_export_* metrics account for every drop).")
 	exportOTLPProtocol := flag.String("export-otlp-protocol", "grpc", "OTLP relay protocol: grpc or http")
 	exportOTLPHeaders := flag.String("export-otlp-headers", "", "comma-separated key=value headers attached to every OTLP export (auth tokens etc.)")
@@ -135,7 +139,33 @@ func main() {
 		tee.spans = spanBuf
 		fmt.Fprintf(os.Stderr, "span ring: capacity %d\n", *spanRingCapacity)
 	}
-	_ = spanBuf // read path lands with the stream service (#99)
+	// Node-local stream service (#99): the query server subscribes
+	// here and multiplexes across agents.
+	if spanBuf != nil && *streamAddr != "" {
+		var opts []grpc.ServerOption
+		mw, err := buildStreamAuth(*scrapeAuth, *scrapeAuthAudiences)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stream auth init failed: %v\n", err)
+			os.Exit(1)
+		}
+		if mw != nil {
+			opts = append(opts, grpc.StreamInterceptor(mw.StreamInterceptor()))
+		}
+		gs := grpc.NewServer(opts...)
+		streamv1.RegisterStreamServiceServer(gs, &streamsvc.AgentServer{Spans: spanBuf})
+		sl, err := net.Listen("tcp", *streamAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stream listen %s: %v\n", *streamAddr, err)
+			os.Exit(1)
+		}
+		go func() {
+			if err := gs.Serve(sl); err != nil {
+				fmt.Fprintf(os.Stderr, "stream server: %v\n", err)
+			}
+		}()
+		defer gs.GracefulStop()
+		fmt.Fprintf(os.Stderr, "stream service: %s\n", sl.Addr())
+	}
 
 	var exportMetrics *export.Metrics
 	if *exportOTLPEndpoint != "" || *exportRWURL != "" {
@@ -340,6 +370,39 @@ func main() {
 
 	<-ctx.Done()
 	fmt.Fprintln(os.Stderr, "received shutdown signal; draining")
+}
+
+// buildStreamAuth resolves the --scrape-auth mode into a scrapeauth
+// middleware for the gRPC stream service, or nil for mode none.
+func buildStreamAuth(mode, audiences string) (*scrapeauth.Middleware, error) {
+	if mode == "auto" {
+		if _, err := rest.InClusterConfig(); err == nil {
+			mode = "token"
+		} else {
+			mode = "none"
+		}
+	}
+	switch mode {
+	case "none":
+		fmt.Fprintln(os.Stderr, "stream auth: DISABLED")
+		return nil, nil
+	case "token":
+		cfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("stream auth requires in-cluster credentials: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		var auds []string
+		if audiences != "" {
+			auds = strings.Split(audiences, ",")
+		}
+		return scrapeauth.New(scrapeauth.Config{Client: client, Audiences: auds, ExemptLoopback: true}), nil
+	default:
+		return nil, fmt.Errorf("unknown auth mode %q", mode)
+	}
 }
 
 // buildScrapeHandler applies the --scrape-auth mode to the Prometheus

@@ -202,6 +202,7 @@ spec:
             # the same token auth as :9090 (ollie-query-reader).
             - --store-dir=/var/lib/ollie/tsdb
             - --query-addr=0.0.0.0:9091
+            - --stream-addr=0.0.0.0:9092
           env:
             # Downward API: node name flows into the agent's
             # AgentHello so the controller can route per-pod deltas
@@ -220,6 +221,12 @@ spec:
             # query-server pods.
             - name: remote-read
               containerPort: 9091
+              protocol: TCP
+            # Node-local stream service for CEL span subscriptions
+            # (v0.5, #99); the query server multiplexes across
+            # agents. Same token posture as the other ports.
+            - name: stream
+              containerPort: 9092
               protocol: TCP
           # tcpSocket rather than httpGet (#155): /metrics requires a
           # bearer token in-cluster (--scrape-auth, #145) and kubelet

@@ -180,3 +180,36 @@ metadata:
 rules:
   - nonResourceURLs: ["/api/v1/query", "/api/v1/query_range"]
     verbs: ["get", "post"]
+---
+# Stream-service authorization (v0.5, #99). gRPC methods authorize
+# as nonResourceURLs (the full method path) with verb `post` — what
+# gRPC is on the wire. One grant covers both the agents' node-local
+# service and the query server's cluster mux.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ollie-stream-reader
+  labels:
+    app.kubernetes.io/name: ollie
+rules:
+  - nonResourceURLs: ["/ollie.stream.v1.StreamService/*"]
+    verbs: ["post"]
+---
+# The query server subscribes to every agent's node-local stream.
+# External consumers (AI agents, iobsctl in-cluster) get their own
+# binding to ollie-stream-reader; loopback (port-forward) is exempt.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ollie-query-stream-reader
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ollie-stream-reader
+subjects:
+  - kind: ServiceAccount
+    name: ollie-query
+    namespace: ollie-system

@@ -84,4 +84,15 @@ protoc \
   --go-grpc_opt=paths=source_relative \
   proto/controlplane/v1/controlplane.proto
 
+echo "==> protoc: gRPC stubs (proto/stream/v1/ -> pkg/stream/pb/)"
+mkdir -p pkg/stream/pb
+PATH="$(go env GOPATH)/bin:${PATH}" \
+protoc \
+  --proto_path=proto \
+  --go_out=pkg/stream/pb \
+  --go_opt=paths=source_relative \
+  --go-grpc_out=pkg/stream/pb \
+  --go-grpc_opt=paths=source_relative \
+  proto/stream/v1/stream.proto
+
 echo "==> done. Run 'go test ./...' to verify."

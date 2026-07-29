@@ -1,0 +1,75 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package ollie.stream.v1;
+
+option go_package = "github.com/gke-labs/in-cluster-observability/pkg/stream/pb";
+
+// StreamService is the live subscription surface (#99, ADR-0026 §7):
+// CEL-filtered spans and periodic PromQL evaluations as server
+// streams. Served by the query server (cluster-wide, multiplexed
+// across agents) and by each agent (node-local; the query server's
+// upstream). Span payloads are serialized OTLP so any OpenTelemetry
+// tooling consumes them directly.
+service StreamService {
+  // SubscribeSpans streams spans matching the CEL filter as they are
+  // captured. Slow consumers lose the oldest undelivered spans; the
+  // loss surfaces as SpanEvent.gap on the next delivery, never as
+  // backpressure into capture.
+  rpc SubscribeSpans(SubscribeSpansRequest) returns (stream SpanEvent);
+
+  // StreamMetrics evaluates a PromQL instant query every step and
+  // streams the resulting samples.
+  rpc StreamMetrics(StreamMetricsRequest) returns (stream MetricSample);
+}
+
+message SubscribeSpansRequest {
+  // cel_filter is a CEL expression over the variables `span`
+  // (opentelemetry.proto.trace.v1.Span) and `resource`
+  // (map<string,string> of resource attributes). Empty matches
+  // everything. Example:
+  //   resource["k8s.namespace.name"] == "shop" &&
+  //   span.kind == 2 // SPAN_KIND_SERVER
+  string cel_filter = 1;
+}
+
+message SpanEvent {
+  // span is a serialized opentelemetry.proto.trace.v1.Span.
+  bytes span = 1;
+  // resource holds the span's OTLP resource attributes, flattened
+  // to strings.
+  map<string, string> resource = 2;
+  // gap counts spans this subscriber lost (drop-oldest) since the
+  // previous delivery.
+  uint64 gap = 3;
+}
+
+message StreamMetricsRequest {
+  string promql = 1;
+  // step_ms is the evaluation cadence in milliseconds. Defaults to
+  // 15000; the server clamps to [1000, 300000].
+  int64 step_ms = 2;
+}
+
+message MetricSample {
+  // labels includes __name__ when the result carries one.
+  map<string, string> labels = 1;
+  double value = 2;
+  int64 timestamp_ms = 3;
+  // degraded is true when the fan-out behind this evaluation missed
+  // at least one agent (storage-and-query.md §5.3).
+  bool degraded = 4;
+}

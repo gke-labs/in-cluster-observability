@@ -59,11 +59,16 @@ spec:
             # layer (#96); self-signed TLS per ADR-0025 §7.
             - --tls-addr=0.0.0.0:6443
             - --custom-metrics-config=/etc/ollie/custom-metrics/config.yaml
+            # Cluster-wide stream service (#99).
+            - --stream-addr=0.0.0.0:9096
+            - --agent-stream-port=9092
           ports:
             - name: http
               containerPort: 9095
             - name: https
               containerPort: 6443
+            - name: grpc-stream
+              containerPort: 9096
           livenessProbe:
             httpGet: { path: /healthz/live, port: http }
             initialDelaySeconds: 10
@@ -119,6 +124,10 @@ spec:
     - name: https
       port: 6443
       targetPort: https
+      protocol: TCP
+    - name: grpc-stream
+      port: 9096
+      targetPort: grpc-stream
       protocol: TCP
 ---
 apiVersion: policy/v1

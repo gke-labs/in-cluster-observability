@@ -117,17 +117,25 @@ func (a *API) Routes() *http.ServeMux {
 // fan-outs still return data — the HPA gets a slightly-low number
 // rather than no number (storage-and-query.md §5.3).
 func (a *API) InstantVector(ctx context.Context, expr string, ts time.Time) (promql.Vector, error) {
-	ctx, _ = fanout.WithStats(ctx)
+	vec, _, err := a.InstantVectorDegraded(ctx, expr, ts)
+	return vec, err
+}
+
+// InstantVectorDegraded additionally reports whether the fan-out
+// skipped any agent (consumed by the metric stream service, #99).
+func (a *API) InstantVectorDegraded(ctx context.Context, expr string, ts time.Time) (promql.Vector, bool, error) {
+	ctx, stats := fanout.WithStats(ctx)
 	q, err := a.engine.NewInstantQuery(ctx, a.queryable, nil, expr, ts)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer q.Close()
 	res := q.Exec(ctx)
 	if res.Err != nil {
-		return nil, res.Err
+		return nil, false, res.Err
 	}
-	return res.Vector()
+	vec, err := res.Vector()
+	return vec, stats.Degraded(), err
 }
 
 // envelope is the Prometheus API response shape plus the fan-out
