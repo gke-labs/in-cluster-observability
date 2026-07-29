@@ -824,6 +824,40 @@ Two sequencing rules ride with this ADR:
 
 ---
 
+## ADR-0027: v0.5.1 hardening — adversarial review closes real defects the green-CI self-merge masked
+
+**Status:** Accepted, 2026-07-29.
+
+**Context.** With v0.5 merged and the milestone closed, the merged tree was put through an adversarial multi-agent review (14 agents across 7 independent lenses, Opus 5). It surfaced 24 findings that survived a verify stage, ~18 distinct after dedup. Green CI plus self-merge plus "milestone closed" had masked real problems — two of which undercut ADR reasoning recorded days earlier:
+
+- A **`:6443` custom-metrics auth bypass**, found independently by three lenses. `cmd/ollie-query` mounted the aggregated API bare — no client-cert verification on the TLS listener — and `k8s/networkpolicy.yaml` opened `:6443` ingress with no `from:` selector. Any pod with zero RBAC could read cross-namespace traffic metrics and drive an unauthenticated PromQL fan-out, bypassing the kube-apiserver RBAC that gates the custom-metrics API. ADR-0025 §7 had justified deferring cert verification "because the default-deny NetworkPolicy bounds exposure" — **that justification was false as written**: the policy left this port open cluster-wide.
+- The **L4 flow metric collapsed its `direction` attribute** (`direction` was not in the #144 allowlist), overwriting request/response/unknown datapoints last-write-wins on a *monotonic* counter → silent loss + counter step-downs → spurious `rate()` spikes. This is the exact metric ADR-0026 §5 cited ("L4 flow metrics … already answer who talks to whom") to justify closing #101–#103. The native labels are intact, but the "queryable via PromQL" claim was compromised until fixed; the #101–#103 closure rationale was partly built on a corrupted metric.
+
+**Decision.** Open a **v0.5.1 hardening phase** that fixes the one CRITICAL and the six HIGH correctness defects immediately, with unit tests, under the same green-CI self-merge flow; defer the MEDIUM/LOW backlog to the v0.6 Hardening leg. Fixed now:
+
+1. **`:6443` client auth (CRITICAL).** The listener requires an aggregation-layer front-proxy (requestheader) client cert: `--custom-metrics-client-auth` loads the requestheader CA from `kube-system/extension-apiserver-authentication` (new `internal/frontproxy`), pins `ClientCAs` + `RequireAndVerifyClientCert`, and gates the handler on the allowed CN. Only the kube-apiserver holds a cert signed by that CA, so an open port is not an open door. Per-user delegated SAR stays deferred (kube-apiserver enforces HPA RBAC before proxying); the serving-cert CA bundle stays with v0.6 per ADR-0025 §7.
+2. **Fan-out serial execution + compounding deadline + primary-querier failure abort.** Agents register as **secondary** queriers (`NewMergeQuerier(nil, queriers, …)`) — concurrent Select, per-agent errors become warnings. A mid-stream `STREAMED_XOR_CHUNKS` failure (surfaced via `SeriesSet.Err()`, which the secondary path does *not* downgrade) is swallowed by an `agentSeriesSet` wrapper that records the agent as a miss and continues degraded rather than aborting the eval.
+3. **Cross-node series merge.** The ingester stamps each self-obs series with a `k8s_node_name` node-identity label so identical series from N nodes no longer chain-merge into one interleaved series (workload metrics were already safe via per-pod `k8s.*`).
+4. **NaN/Inf → HPA garbage.** The custom-metrics adapter treats a non-finite PromQL result as "no value" (404) instead of coercing it to a garbage int64 via `NewMilliQuantity`, so the HPA holds its replica count.
+5. **Forwarder label-schema pinning.** The first-seen label set is no longer frozen for the process lifetime; a later datapoint carrying additional keys widens the schema to the union and migrates existing series onto it, so no key is silently dropped node-order-dependently.
+6. **L4 `direction` collapse.** `direction` is added to the #144 `ForwardAllowedLabelKeys` allowlist so the three directions stay distinct series; this restores the ADR-0026 §5 closure rationale for #101–#103.
+
+**Deferred to v0.6** (recorded so they are not lost with the review context):
+
+- *MEDIUM* — HPA `metricLabelSelector` silently dropped (unfiltered aggregate returned under the requested name); CEL runtime error tears down a whole span stream (the documented example filter throws on spans lacking the key); span ring is drop-*newest* while the proto/ADR-0026 §7/its own comments promise drop-*oldest*; `TestIobsctl` is false-green (asserts only a header that prints on empty results); agent memory limit still 200Mi vs the sizing doc's 400Mi after the tsdb head + span ring landed (OOM risk).
+- *LOW* — query-server `SubscribeSpans` hangs open silently when all upstreams end (masks auth failure as "no traffic"); `StreamMetrics` returns non-retriable `InvalidArgument` on transient errors; no staleness markers on ingest/remote-write; readiness probe tests only `:9090` so a WAL-replaying pod joins the fan-out before `:9091` is up; namespace pseudo-resource advertised in discovery but unrouted; `services→service_name` doesn't map to the K8s Service name.
+
+**Consequences.**
+
+- ✅ The security hole and the six correctness bugs are closed with regression tests before v0.6 builds on the surface.
+- ✅ ADR-0025 §7 and ADR-0026 §5 are corrected in place — the NetworkPolicy is no longer load-bearing for `:6443` authn, and the L4 metric is sound again.
+- ⚠️ The MEDIUM/LOW backlog rides v0.6; the drop-newest span ring and the memory-limit gap are the most user-visible of these.
+- 📌 **Process signal:** green CI + self-merge did not catch a cluster-wide auth bypass or a corrupted-metric regression. The adversarial review is worth repeating at milestone close, not only mid-flight.
+
+**Implemented in.** `v0.5.1/phase-1-hardening`.
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.
