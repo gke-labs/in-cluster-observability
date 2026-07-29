@@ -119,9 +119,7 @@ The principle: ship a focused v1 that hits requirements §1–§7 cleanly, then 
 
 ## 9. Plugin model for non-Go sinks / filters
 
-**Motivation.** Public API ([`public-api.md`](public-api.md)) §8 raised this. Go plugins are operationally painful; WASM filters are a long-term option.
-
-**Path.** Not before v1.x. If pursued, likely WASM via wazero, with the host providing a stable WIT-defined interface mirroring the Go `Sink` and `Enricher` shapes.
+**Retired by [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157) (2026-07-29, pending acceptance).** Extensibility is wire-protocol-based (OTLP push, streaming subscribe, scrape/remote-write); there is no in-process extension point left for a plugin model to serve. Non-Go consumers were the strongest argument for WASM — they are served natively by the wire surface.
 
 ## 10. eBPF-side cardinality enforcement
 

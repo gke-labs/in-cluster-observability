@@ -65,6 +65,8 @@ A central query layer fans out to node-local stores and aggregates. Long-term st
 
 ### 2.4 Sinks and extensibility — library + controller
 
+> **Amended by [ADR-0024](design/decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157) (2026-07-29):** the library clause below is superseded. The project ships as a **deployable system with open egress** — extensibility is delivered over the wire (OTLP push to configured endpoints, CEL-filtered streaming subscribe, Prometheus scrape/remote-write), not via an importable Go module. "Adding a sink requires no fork" stands, satisfied by network interfaces. The original text is preserved below for history; the differentiation-vs-Pixie framing is restated as *open egress*.
+
 The project ships as **both a controller (deployable) and a library (importable Go module)**. This is a load-bearing requirement, not a nice-to-have:
 
 - A small core (capture → in-cluster store → query) is a library.

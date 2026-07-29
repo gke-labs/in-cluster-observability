@@ -1,6 +1,6 @@
 # Public Go API
 
-**Status:** Draft, 2026-05-17
+**Status:** Draft, 2026-05-17 — **superseded in substance by [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157) (2026-07-29, pending acceptance):** extensibility is wire-protocol-based; the public Go surface shrinks to `pkg/schema` + the OTLP translators (Experimental). This document is retained until the v0.5 rewrite; treat its embedder narrative as historical.
 **Owners:** TBD
 
 This document defines the **library surface** that third-party integrators import. Per [ADR-0004](decisions.md#adr-0004-library--controller-posture-public-api-in-pkg) and requirement §2.4, "third parties wrap us and register their own sinks" is load-bearing — every other design doc assumes the API contract described here.

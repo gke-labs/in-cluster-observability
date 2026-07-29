@@ -710,8 +710,50 @@ Two sequencing rules ride with this ADR:
 
 ---
 
+## ADR-0024: Extensibility via wire protocols, not a Go library (resolves #157)
+
+**Status:** Proposed, 2026-07-29 — merging the PR that adds this ADR constitutes acceptance. Supersedes the library clause of requirements §2.4, [ADR-0004](#adr-0004-library--controller-posture-public-api-in-pkg)'s "importable Go library" posture, and [ADR-0011](#adr-0011-sink-interface-shape)'s in-process sink interfaces.
+
+**Context.** Requirements §2.4 made "third parties import the library and register their own sinks" load-bearing, as the differentiator versus Pixie. That posture was designed before [ADR-0018](#adr-0018-obi-as-sibling-container-not-embedded-library), when the plan was an in-process Go event pipeline embedders could hook. Three milestones later, the premise no longer describes the system:
+
+- **Capture is a pod topology, not a Go capability.** An importer of `pkg/capture` gets a config writer and loopback OTLP receiver that are meaningless without the OBI sibling container deployed exactly as our DaemonSet deploys it. "Embedding" would be re-packaging our deployment.
+- **The controller** is a controller-runtime app reconciling our CRDs — deployed, not embedded.
+- **Sinks never needed Go.** The data is OTLP-shaped end to end (the reason OBI was chosen, [ADR-0001](#adr-0001-ebpf-data-plane--opentelemetry-ebpf-instrumentation-obi)). A "custom sink" is an OTLP endpoint we push to, a CEL-filtered streaming subscription, or a Prometheus scrape — all v0.5 deliverables, all consumable with zero Go coupling, including by the AI-agent consumers of requirements §4 who were never going to link a Go module.
+- **The evidence agrees.** `pkg/sink`'s registry has no data path, `pkg/obsapi` constructs a no-op manager regardless of Role, `pkg/query` is an empty interface — decorative since v0.1, with zero external demand (no issues, no discussions). Meanwhile every load-bearing piece built since (bridge, collector, recorder) needed no public surface.
+- **The cost is real.** Designing v0.5's store/query interfaces for hypothetical embedders taxes the HPA vertical slice; `Stability: Stable` tags on unimplemented packages promise semver we cannot honor; v1.0 would owe docs/examples for an API nobody uses.
+
+**Decision.**
+
+1. **Extensibility is delivered over the wire.** The supported extension surface is: OTLP push to operator-configured endpoints, the gRPC streaming query/subscribe API (CEL-filtered), the Prometheus scrape endpoint, and (v0.5) remote-write. "Adding a sink requires no fork" is satisfied by pointing the system at your endpoint, not by implementing a Go interface.
+2. **The product is the deployable.** Requirements §2.4's "ships as both a controller and a library" is amended to "ships as a deployable system with open egress." The Pixie differentiation is restated as **open egress**: Pixie's data lives behind PxL and its store; ours leaves in standard protocols.
+3. **The Go surface shrinks to what is genuinely reusable**: `pkg/schema` (constants) and the OTLP translators (`pkg/capture.TranslateMetrics/TranslateTraces`), all `Stability: Experimental`. Everything else is fair game to move under `internal/` as v0.5 touches it; no package carries `Stable` until it has an implementation and a consumer.
+4. **v0.5 designs store/query for the binary**, under `internal/`, shaped by the HPA slice — not for embedders. If a concrete embedder materializes later, a library is extracted from working code then (cheap) rather than speculated now (expensive).
+5. **Deletions over stubs**: `pkg/sink` (registry + interfaces), `pkg/obsapi`, and the `pkg/store`/`pkg/query` interface stubs are removed as v0.5 work items rather than implemented.
+
+**Consequences.**
+
+- ✅ v0.5's interfaces serve the HPA demo, not a hypothetical audience; the vertical slice gets faster.
+- ✅ The differentiation claim becomes honest and stronger — wire protocols reach strictly more consumers than a Go API.
+- ✅ Semver/docs burden at v1.0 shrinks to two small Experimental packages.
+- ✅ Roadmap item 9 (WASM plugin model) is retired — the extension point it served no longer exists. Roadmap item 6's future first-party sinks become built-in egress features behind config, or external consumers of the stream.
+- ⚠️ If a serious Go embedder appears, extraction is a deliberate later project. Accepted: extracting from working internals is cheaper than maintaining speculative API, and no such embedder exists today.
+- ⚠️ `docs/design/public-api.md` and `sinks-and-extensibility.md` require rewrites; banners added now, full rewrite rides with v0.5.
+
+**Rejected alternatives.**
+
+- *Keep library-first as written.* Maintains a promise the architecture stopped supporting at ADR-0018; taxes every v0.5 interface; zero demonstrated demand.
+- *Narrow to "embed sink/store/query only."* The middle path considered in #157. Still forces public API design onto v0.5's critical path for the same hypothetical audience; wire protocols serve every named consumer better.
+- *WASM/plugin sinks (roadmap 9).* Solves in-process extension for non-Go — but there is no in-process extension point worth keeping once egress is wire-based.
+
+**Supersedes.** Requirements §2.4 library clause (amendment note added in place); ADR-0004's library posture (its `pkg/` vs `internal/` layout convention stands); ADR-0011 in full (the three sink interfaces are deleted, not implemented).
+
+**Implemented in.** This PR (docs). Code deletions and `internal/` moves land as v0.5 work items.
+
+---
+
 ## Open and superseded ADRs
 
+- **ADR-0004 / ADR-0011** — superseded by ADR-0024 (pending acceptance): extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.
 - **ADR-0017.4** — superseded by ADR-0021. OBI's native K8s attribute attachment is now ON; the agent attaches none.
 - **ADR-0020** — sub-decisions superseded in part by ADR-0021. See ADR-0021 consequences for the per-clause status.
 - **ADR-0009** — narrowed by ADR-0022.5. Identity broadcasting cut from v0.4 because OBI's informer covers the source-side case natively (ADR-0021); the ADR-0009 mechanism may reopen in v0.5+ for the off-cluster / L7-peer cases that OBI doesn't cover.
