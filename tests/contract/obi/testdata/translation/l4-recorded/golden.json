@@ -17,7 +17,10 @@
         "k8s.src.owner.type": "Service",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   },
   {
@@ -38,7 +41,10 @@
         "k8s.src.owner.type": "",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   },
   {
@@ -59,7 +65,10 @@
         "k8s.src.owner.type": "DaemonSet",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   },
   {
@@ -80,7 +89,10 @@
         "k8s.src.owner.type": "Service",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   },
   {
@@ -101,7 +113,10 @@
         "k8s.src.owner.type": "",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   },
   {
@@ -122,7 +137,10 @@
         "k8s.src.owner.type": "DaemonSet",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   },
   {
@@ -143,7 +161,10 @@
         "k8s.src.owner.type": "DaemonSet",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   },
   {
@@ -164,7 +185,10 @@
         "k8s.src.owner.type": "DaemonSet",
         "obi.revision": "e92b0c2",
         "obi.version": "v0.9.0"
-      }
+      },
+      "type": "sum",
+      "temporality": "cumulative",
+      "monotonic": true
     }
   }
 ]

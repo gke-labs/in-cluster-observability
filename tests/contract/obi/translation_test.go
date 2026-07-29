@@ -78,9 +78,15 @@ func normalize(events []capture.Event) []goldenEvent {
 		}
 		if ev.Metric != nil {
 			ge.Metric = &goldenMetric{
-				Name:       ev.Metric.Name,
-				Value:      ev.Metric.Value,
-				Attributes: ev.Metric.Attributes,
+				Name:         ev.Metric.Name,
+				Value:        ev.Metric.Value,
+				Attributes:   ev.Metric.Attributes,
+				Type:         metricTypeString(ev.Metric.Type),
+				Temporality:  temporalityString(ev.Metric.Temporality),
+				Monotonic:    ev.Metric.Monotonic,
+				Count:        ev.Metric.Count,
+				Bounds:       ev.Metric.Bounds,
+				BucketCounts: ev.Metric.BucketCounts,
 			}
 		}
 		if ev.Span != nil {

@@ -43,6 +43,8 @@ import (
 	collmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	colltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/gke-labs/in-cluster-observability/pkg/capture"
 )
 
 // updateGoldens is set by `go test -update`; when true the harness
@@ -66,6 +68,41 @@ type goldenMetric struct {
 	Name       string            `json:"name"`
 	Value      float64           `json:"value"`
 	Attributes map[string]string `json:"attributes,omitempty"`
+
+	// Typed re-emission contract (#153): a pinned OBI image that flips
+	// a metric's type, temporality, monotonicity, or bucket layout is
+	// a breaking change this golden must catch — those fields decide
+	// whether :9090 counters inflate.
+	Type         string    `json:"type,omitempty"`
+	Temporality  string    `json:"temporality,omitempty"`
+	Monotonic    bool      `json:"monotonic,omitempty"`
+	Count        uint64    `json:"count,omitempty"`
+	Bounds       []float64 `json:"bounds,omitempty"`
+	BucketCounts []uint64  `json:"bucket_counts,omitempty"`
+}
+
+func metricTypeString(t capture.MetricType) string {
+	switch t {
+	case capture.MetricTypeSum:
+		return "sum"
+	case capture.MetricTypeGauge:
+		return "gauge"
+	case capture.MetricTypeHistogram:
+		return "histogram"
+	default:
+		return ""
+	}
+}
+
+func temporalityString(t capture.Temporality) string {
+	switch t {
+	case capture.TemporalityDelta:
+		return "delta"
+	case capture.TemporalityCumulative:
+		return "cumulative"
+	default:
+		return ""
+	}
 }
 
 type goldenSpan struct {
