@@ -132,3 +132,89 @@ func TestQueryFanout(t *testing.T) {
 				!strings.Contains(body, `"result":[]`)
 		})
 }
+
+// TestHPACustomMetrics is #96's end-to-end gate and the v0.5
+// vertical-slice capstone: the aggregated custom.metrics.k8s.io API
+// serves OBI-derived metrics, and an HPA scales a workload on them.
+// Full path under test: OBI capture -> agent tsdb -> remote-read
+// fan-out -> PromQL -> custom-metrics adapter -> kube-aggregator ->
+// HPA controller -> Deployment scale.
+func TestHPACustomMetrics(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, "ollie-e2e")
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+	h.DeployTestWorkload()
+
+	// The aggregator marks the APIService Available once it can
+	// reach the backend over TLS.
+	h.PollKubectl(2*time.Minute, "APIService v1beta1.custom.metrics.k8s.io Available",
+		func() (string, error) {
+			return h.KubectlOutput("get", "apiservice", "v1beta1.custom.metrics.k8s.io",
+				"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`)
+		},
+		func(out string) bool { return strings.TrimSpace(out) == "True" })
+
+	// #96 acceptance: the raw GET returns a MetricValueList. Both
+	// the bare-plural form from the issue text and the grouped form
+	// the HPA uses.
+	for _, res := range []string{"deployments", "deployments.apps"} {
+		path := "/apis/custom.metrics.k8s.io/v1beta1/namespaces/default/" + res + "/echo/qps"
+		h.PollKubectl(4*time.Minute, "custom metric qps for deployment echo via "+res,
+			func() (string, error) { return h.KubectlOutput("get", "--raw", path) },
+			func(out string) bool {
+				return strings.Contains(out, `"kind":"MetricValueList"`) &&
+					strings.Contains(out, `"metricName":"qps"`)
+			})
+	}
+
+	// The HPA demo: scale echo on qps per pod. traffic-client drives
+	// a steady few requests per second; averageValue 500m (0.5 rps
+	// per replica) forces a scale-up from 1 without needing precise
+	// load numbers.
+	h.ApplyStdin(`
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: echo
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: echo
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Object
+      object:
+        describedObject:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: echo
+        metric:
+          name: qps
+        target:
+          type: AverageValue
+          averageValue: 500m
+`)
+
+	h.PollKubectl(6*time.Minute, "HPA scales echo above 1 replica on qps",
+		func() (string, error) {
+			return h.KubectlOutput("get", "deployment", "echo", "-n", "default",
+				"-o", "jsonpath={.status.replicas}")
+		},
+		func(out string) bool {
+			out = strings.TrimSpace(out)
+			return out == "2" || out == "3"
+		})
+}

@@ -116,6 +116,28 @@ func (h *Harness) Kubectl(args ...string) {
 	h.Run("kubectl", append([]string{"--context", h.context()}, args...)...)
 }
 
+// KubectlRetry runs kubectl, retrying transient failures (e.g. the
+// aggregator 500-window right after an APIService lands) before
+// failing the test.
+func (h *Harness) KubectlRetry(attempts int, args ...string) {
+	h.t.Helper()
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(5 * time.Second)
+		}
+		full := append([]string{"--context", h.context()}, args...)
+		h.t.Logf("+ kubectl %s (attempt %d/%d)", strings.Join(args, " "), i+1, attempts)
+		cmd := exec.Command("kubectl", full...)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return
+		}
+		lastErr = fmt.Errorf("kubectl %v: %w: %s", args, err, out)
+	}
+	h.t.Fatal(lastErr)
+}
+
 // KubectlOutput runs kubectl pinned to this cluster and returns stdout.
 // Errors are returned, not fatal — callers poll with it.
 func (h *Harness) KubectlOutput(args ...string) (string, error) {
@@ -222,6 +244,30 @@ func (h *Harness) PollHTTP(url string, timeout time.Duration, desc string, predi
 	h.saveArtifact("last-poll-response.txt", last)
 	h.t.Fatalf("timed out after %s waiting for %s at %s (last response saved to artifacts, %d bytes)",
 		timeout, desc, url, len(last))
+}
+
+// PollKubectl polls fn until predicate accepts its output or the
+// timeout expires; on timeout it fails the test with the last output
+// (kubectl errors count as output so 404s from --raw are visible).
+func (h *Harness) PollKubectl(timeout time.Duration, desc string, fn func() (string, error), predicate func(out string) bool) {
+	h.t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := fn()
+		if err != nil {
+			last = out + " (error: " + err.Error() + ")"
+		} else {
+			last = out
+			if predicate(out) {
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	h.saveArtifact("last-poll-kubectl.txt", last)
+	h.t.Fatalf("timed out after %s waiting for %s (last output saved to artifacts): %.500s",
+		timeout, desc, last)
 }
 
 // DumpDiagnostics captures cluster state and component logs. Call from
@@ -360,11 +406,20 @@ func (h *Harness) InstallOllie(repoRoot string) {
 	h.PullAndLoad(PinnedOBIImage(h.t, repoRoot))
 
 	h.Kubectl("apply", "-k", filepath.Join(repoRoot, "k8s"))
-	h.Kubectl("patch", "daemonset", "ollie-agent", "-n", "ollie-system", "--type=strategic",
+
+	// Applying the custom-metrics APIService (v0.5, #96) makes the
+	// kube-apiserver's aggregator re-wire; requests racing that
+	// window can catch transient 500s (observed as a failed
+	// /readyz probe right after apply). Settle before patching.
+	h.PollKubectl(2*time.Minute, "kube-apiserver /readyz after APIService registration",
+		func() (string, error) { return h.KubectlOutput("get", "--raw", "/readyz") },
+		func(out string) bool { return strings.Contains(out, "ok") })
+
+	h.KubectlRetry(3, "patch", "daemonset", "ollie-agent", "-n", "ollie-system", "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"agent","image":"ollie:e2e","imagePullPolicy":"Never"}]}}}}`)
-	h.Kubectl("patch", "deployment", "ollie-controller", "-n", "ollie-system", "--type=strategic",
+	h.KubectlRetry(3, "patch", "deployment", "ollie-controller", "-n", "ollie-system", "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"controller","image":"ollie-controller:e2e","imagePullPolicy":"Never"}]}}}}`)
-	h.Kubectl("patch", "deployment", "ollie-query", "-n", "ollie-system", "--type=strategic",
+	h.KubectlRetry(3, "patch", "deployment", "ollie-query", "-n", "ollie-system", "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"query","image":"ollie-query:e2e","imagePullPolicy":"Never"}]}}}}`)
 	h.WaitRollout("daemonset", "ollie-agent", "ollie-system", 5*time.Minute)
 	h.WaitRollout("deployment", "ollie-controller", "ollie-system", 3*time.Minute)
