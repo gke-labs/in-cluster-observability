@@ -15,7 +15,6 @@
 package store
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -59,7 +58,7 @@ func TestIngesterTick(t *testing.T) {
 	reg.MustRegister(ctr, gauge, hist)
 
 	ing := NewIngester(s, reg, reg, time.Second, nil)
-	ing.Tick(context.Background())
+	ing.Tick(t.Context())
 	now := time.Now()
 
 	for q, want := range map[string]float64{
@@ -84,7 +83,7 @@ func TestIngesterTick(t *testing.T) {
 
 	// Self-obs metrics are registered on the same registry, so the
 	// next tick stores them too.
-	ing.Tick(context.Background())
+	ing.Tick(t.Context())
 	vec := queryInstant(t, s, `ollie_store_samples_appended_total`, time.Now())
 	if len(vec) != 1 || vec[0].F <= 0 {
 		t.Errorf("ollie_store_samples_appended_total = %v, want > 0", vec)

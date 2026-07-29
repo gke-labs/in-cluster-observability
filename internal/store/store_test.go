@@ -15,7 +15,6 @@
 package store
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,12 +36,12 @@ func newTestEngine(t *testing.T) *promql.Engine {
 func queryInstant(t *testing.T, s *Store, q string, ts time.Time) promql.Vector {
 	t.Helper()
 	eng := newTestEngine(t)
-	qry, err := eng.NewInstantQuery(context.Background(), s.Queryable(), nil, q, ts)
+	qry, err := eng.NewInstantQuery(t.Context(), s.Queryable(), nil, q, ts)
 	if err != nil {
 		t.Fatalf("NewInstantQuery(%q): %v", q, err)
 	}
 	defer qry.Close()
-	res := qry.Exec(context.Background())
+	res := qry.Exec(t.Context())
 	if res.Err != nil {
 		t.Fatalf("Exec(%q): %v", q, res.Err)
 	}
@@ -61,7 +60,7 @@ func TestOpenAppendQueryClose(t *testing.T) {
 	defer s.Close()
 
 	base := time.Now().Add(-time.Minute)
-	app := s.Appender(context.Background())
+	app := s.Appender(t.Context())
 	lbls := labels.FromStrings(labels.MetricName, "test_gauge", "k8s_pod_name", "p1")
 	if _, err := app.Append(0, lbls, base.UnixMilli(), 42); err != nil {
 		t.Fatalf("Append: %v", err)
@@ -96,7 +95,7 @@ func TestPromQLRoundTrip(t *testing.T) {
 	base := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
 	step := time.Second
 
-	app := s.Appender(context.Background())
+	app := s.Appender(t.Context())
 	for i := 0; i < samples; i++ {
 		ts := base.Add(time.Duration(i) * step).UnixMilli()
 		for j := 0; j < series; j++ {
@@ -141,7 +140,7 @@ func TestWALRestart(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	base := time.Now().Add(-time.Minute)
-	app := s.Appender(context.Background())
+	app := s.Appender(t.Context())
 	lbls := labels.FromStrings(labels.MetricName, "test_persisted", "k8s_pod_name", "p1")
 	if _, err := app.Append(0, lbls, base.UnixMilli(), 7); err != nil {
 		t.Fatalf("Append: %v", err)
