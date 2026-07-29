@@ -17,6 +17,8 @@ package e2e
 import (
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -335,4 +337,58 @@ spec:
 	// Capture is unharmed: the scrape surface still serves.
 	h.PollHTTP(base+"/metrics", 1*time.Minute, "agent alive after export endpoint death",
 		func(body string) bool { return strings.Contains(body, "ollie_agent_up") })
+}
+
+// TestIobsctl is #100's gate and doubles as #99's deployed-wiring
+// check: the CLI reaches the query server over an automatic
+// port-forward, PromQL returns a table, and a CEL-filtered span
+// subscription streams live spans multiplexed from the agent's
+// stream service.
+func TestIobsctl(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, "ollie-e2e")
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+	h.DeployTestWorkload()
+
+	bin := filepath.Join(t.TempDir(), "iobsctl")
+	h.Run("go", "build", "-o", bin, repoRoot+"/cmd/iobsctl")
+
+	kubectx := "kind-" + h.ClusterName
+
+	// PromQL through the CLI: ollie_agent_up lands in the store
+	// within seconds of boot.
+	h.PollKubectl(3*time.Minute, "iobsctl metrics returns sum(ollie_agent_up)",
+		func() (string, error) {
+			out, err := exec.Command(bin, "metrics", "sum(ollie_agent_up)",
+				"--context", kubectx, "--timeout", "30s").CombinedOutput()
+			return string(out), err
+		},
+		func(out string) bool {
+			return strings.Contains(out, "METRIC") && strings.Contains(out, "VALUE")
+		})
+
+	// Live CEL span stream: the echo workload produces HTTP server
+	// spans in the default namespace continuously; --max 1 exits on
+	// the first match.
+	h.PollKubectl(4*time.Minute, "iobsctl spans streams a CEL-matched span",
+		func() (string, error) {
+			out, err := exec.Command(bin, "spans",
+				"--filter", `resource["k8s.namespace.name"] == "default"`,
+				"--max", "1", "--output", "json",
+				"--context", kubectx, "--timeout", "60s").CombinedOutput()
+			return string(out), err
+		},
+		func(out string) bool {
+			return strings.Contains(out, `"span"`) && strings.Contains(out, `"k8s.namespace.name":"default"`)
+		})
 }

@@ -13,7 +13,7 @@ This document specifies how data leaves the system. Per ADR-0024, a "sink" is no
 | Query API | pull | PromQL over HTTP (`/api/v1/query`, `/api/v1/query_range`) + `custom.metrics.k8s.io` on the query server; agents also serve standard remote read on `:9091` | v0.5 ✅ (#94–#96) |
 | OTLP push | push | OTLP/gRPC and OTLP/HTTP to operator-configured endpoints (`--export-otlp-*`) | v0.5 ✅ (#97, #98) |
 | Remote write | push | Prometheus remote-write v1 (`--export-remote-write-url`), same sample stream the local store ingests | v0.5 ✅ |
-| Streaming subscribe | push (subscription) | gRPC server-stream with CEL filter, OTLP-encoded payloads | v0.5 (breadth) — [#99](https://github.com/gke-labs/in-cluster-observability/issues/99) |
+| Streaming subscribe | push (subscription) | gRPC server-stream with CEL filter, OTLP-encoded payloads (`proto/stream/v1`, query server `:9096`) | v0.5 ✅ (#99) |
 
 ## 2. Prometheus scrape (shipped)
 
@@ -36,14 +36,14 @@ Prometheus **remote-write v1** (`--export-remote-write-url`) snapshots the agent
 
 Endpoint configuration via CRD (`ClusterTrafficPolicy`) remains open question 3, waiting on a control-plane consumer.
 
-## 5. Streaming subscribe (v0.5 breadth)
+## 5. Streaming subscribe (shipped, `proto/stream/v1`)
 
-A gRPC service on the query server for live consumers (AI agents primarily):
+A gRPC service for live consumers (AI agents primarily), served cluster-wide by the query server (`:9096`) and node-locally by each agent (`:9092`, the query server's upstream):
 
-- `Subscribe(filter: CEL, kinds: [SPANS|EDGES|METRICS]) → stream` — long-lived server stream, payloads OTLP-encoded so downstream OTel tooling consumes them directly.
-- The query server compiles the CEL program once, fans the subscription out to node-local agents, and multiplexes the results.
+- `SubscribeSpans(cel_filter) → stream SpanEvent` — payloads are serialized OTLP `Span`s plus flattened resource attributes, so downstream OTel tooling consumes them directly. The CEL program compiles against the real OTLP `Span` type and evaluates **on the agent** — non-matching spans never cross the network (ADR-0026 §7).
+- `StreamMetrics(promql, step) → stream MetricSample` — periodic instant evaluation over the read fan-out, samples carry the degraded flag.
 
-Slow consumers get bounded buffering and gap markers, not backpressure into the capture path. `iobsctl` ([#100](https://github.com/gke-labs/in-cluster-observability/issues/100)) is the first-party client of this surface.
+Slow consumers get bounded buffering and gap markers (`SpanEvent.gap`), not backpressure into the capture path. `iobsctl` is the first-party client of this surface; `StreamEdges` is deferred with the edge producer (ADR-0026 §5).
 
 ## 6. Failure isolation
 
