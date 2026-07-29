@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
 )
@@ -52,6 +53,13 @@ type Config struct {
 
 	// Logger receives tsdb's own logging. Defaults to slog.Default.
 	Logger *slog.Logger
+
+	// MetricsRegisterer, when set, receives the store's bounded
+	// self-observability set (ollie_store_compactions_total,
+	// ollie_store_wal_fsync_seconds) bridged from tsdb's internal
+	// registry — the other ~100 tsdb series stay off the agent's
+	// scrape surface (ADR-0026 §4).
+	MetricsRegisterer prometheus.Registerer
 }
 
 func (c *Config) applyDefaults() {
@@ -89,14 +97,34 @@ func New(cfg Config) (*Store, error) {
 	// the restart.
 	opts.NoLockfile = true
 
-	// The registerer is nil deliberately: tsdb's ~100 internal series
-	// would otherwise land on the agent's bounded :9090 surface. The
-	// ingester exposes the small ollie_store_* set instead.
-	db, err := tsdb.Open(cfg.Dir, cfg.Logger.With("component", "tsdb"), nil, opts, nil)
+	// tsdb registers its internals on a private registry; a bridge
+	// re-exports only the allowlisted pair under ollie_store_* names
+	// so the agent's bounded :9090 surface doesn't grow ~100 series.
+	tsdbReg := prometheus.NewRegistry()
+	db, err := tsdb.Open(cfg.Dir, cfg.Logger.With("component", "tsdb"), tsdbReg, opts, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store: open tsdb at %s: %w", cfg.Dir, err)
 	}
+	if cfg.MetricsRegisterer != nil {
+		cfg.MetricsRegisterer.MustRegister(&bridgeCollector{
+			src: tsdbReg,
+			rename: map[string]string{
+				"prometheus_tsdb_compactions_total": "ollie_store_compactions_total",
+				// tsdb exposes fsync latency as a summary; the §8
+				// histogram shape is not available without forking
+				// tsdb's metric registration.
+				"prometheus_tsdb_wal_fsync_duration_seconds": "ollie_store_wal_fsync_seconds",
+			},
+		})
+	}
 	return &Store{db: db}, nil
+}
+
+// Compact triggers a head→block compaction cycle (which also
+// enforces retention). tsdb runs this on its own schedule; the
+// explicit trigger exists for tests and future admin tooling.
+func (s *Store) Compact(ctx context.Context) error {
+	return s.db.Compact(ctx)
 }
 
 // Appender returns a batched appender; callers must Commit or
