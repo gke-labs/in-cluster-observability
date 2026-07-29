@@ -1,6 +1,6 @@
 # Data Plane (Agent)
 
-**Status:** Draft, 2026-05-17
+**Status:** Draft, 2026-05-17 — **partially superseded.** [ADR-0021](decisions.md#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment) removed the enricher/PID-cache/identity-client narrative (OBI's native K8s enrichment is ON; the agent attaches nothing). [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157) removed the in-process sink registry and the `obsapi` library configuration story (§8's `obsapi.Config`, open question 3). The DaemonSet/OBI topology, reload, and self-obs content remains current; read [`obi-integration.md`](obi-integration.md) and [`sinks-and-extensibility.md`](sinks-and-extensibility.md) first.
 **Owners:** TBD
 
 This document specifies the per-node agent: the DaemonSet pod that runs eBPF capture, enriches each event with Kubernetes identity, writes to the local in-cluster store, and feeds registered sinks. It satisfies requirements §2.1 (Capture) and §2.5 (Standard derived metrics) and implements [ADR-0006](decisions.md#adr-0006-kerneldistro-target--cos-125-kernel-6x-btfco-re-required).

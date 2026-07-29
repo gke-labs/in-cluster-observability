@@ -132,7 +132,7 @@ Per [ADR-0017.5](decisions.md#175-v02-metricspan-field-set--minimal-http-focused
 - L4 TCP metrics → `Event{Kind: Metric, Metric: &MetricEvent{name, value, attrs: {peer_ip, peer_port, direction}}}`
 - HTTP/1.1 spans → `Event{Kind: Span, Span: &SpanEvent{method, path_raw, status, duration_ns, peer_ip, peer_port}}`
 - HTTP/1.1 metrics (counter, histogram) → `Event{Kind: Metric, ...}`
-- Per [ADR-0017.4](decisions.md#174-strip-obis-built-in-kubernetes-attribution), we **drop OBI's `k8s.*` resource attributes** at translation time (we'll re-attribute via `pkg/topology` in v0.3).
+- Per [ADR-0017.4](decisions.md#174-strip-obis-built-in-kubernetes-attribution), v0.2 **dropped OBI's `k8s.*` resource attributes** at translation time. (Superseded by [ADR-0021](decisions.md#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment): OBI's native K8s attribution is now ON and passes through.)
 
 The translation lives in `pkg/capture/otlp_translate.go`; tested via contract tests (§6).
 

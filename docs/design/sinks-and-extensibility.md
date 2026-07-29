@@ -1,370 +1,76 @@
 # Sinks and Extensibility
 
-**Status:** Draft, 2026-05-17
+**Status:** Rewritten for [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157), 2026-07-29 (supersedes the 2026-05-17 in-process sink-interface draft)
 **Owners:** TBD
 
-This document specifies how data leaves the system. It implements [ADR-0011](decisions.md#adr-0011-sink-interface-shape) and satisfies requirement §2.4 (pluggable sinks; library + controller posture).
-
-A "sink" is anything that consumes captured records — an OTLP collector, a Prometheus server, the Kubernetes HPA via `custom.metrics.k8s.io`, an AI agent's streaming subscriber, or a third-party Go binary that imports `pkg/sink` and registers its own. All are first-class.
-
-## 1. Three interfaces, one lifecycle
-
-Per [ADR-0011](decisions.md#adr-0011-sink-interface-shape), the three I/O patterns get three explicit interfaces. All share a `Lifecycle`. A single sink may implement multiple interfaces.
-
-```go
-// Package sink — public registration surface.
-//
-// Stability: Stable
-package sink
-
-import (
-    "context"
-    "net/http"
-
-    "github.com/go-logr/logr"
-    "go.opentelemetry.io/otel/metric"
-)
-
-// Sink is the union; every registered sink satisfies it via at least one of
-// PushSink / PullSink / StreamingSink.
-type Sink interface {
-    Lifecycle
-}
-
-// Lifecycle is shared. Init runs once before any traffic; Start launches any
-// background goroutines; Stop drains and shuts down. All methods must be
-// idempotent for retries.
-type Lifecycle interface {
-    Init(ctx context.Context, deps Deps) error
-    Start(ctx context.Context) error
-    Stop(ctx context.Context) error
-    Name() string
-}
-
-// Deps is what core gives the sink at Init time.
-type Deps struct {
-    Logger  logr.Logger
-    Store   StoreReader   // read-only view of the in-cluster store
-    Query   QueryEngine   // PromQL + CEL handles
-    Metrics metric.Meter  // self-observability handle for sink-owned metrics
-}
-
-// PushSink — core hands records to the sink on each write batch.
-type PushSink interface {
-    Sink
-    Write(ctx context.Context, batch Batch) error
-}
-
-// PullSink — the sink registers HTTP handlers; consumers scrape on demand.
-type PullSink interface {
-    Sink
-    RegisterRoutes(mux *http.ServeMux)
-}
-
-// StreamingSink — the sink delivers a long-lived stream to one subscriber.
-// Core invokes Subscribe per connection; the sink decides how it pulls from
-// the store via Deps.
-type StreamingSink interface {
-    Sink
-    Subscribe(ctx context.Context, filter string) (<-chan Event, error)
-}
-```
-
-A sink struct decides which interfaces to satisfy:
-
-```go
-type myWebhookSink struct { /* ... */ }
-
-func (s *myWebhookSink) Init(ctx context.Context, d Deps) error { /* ... */ }
-func (s *myWebhookSink) Start(ctx context.Context) error        { /* ... */ }
-func (s *myWebhookSink) Stop(ctx context.Context) error         { /* ... */ }
-func (s *myWebhookSink) Name() string                           { return "webhook" }
-func (s *myWebhookSink) Write(ctx context.Context, b Batch) error { /* POST */ }
-// → PushSink only
-```
-
-## 2. The `Batch` shape
-
-```go
-type Batch struct {
-    Source  Source                    // node identity for the producing agent
-    Metrics []Metric                  // tsdb-shaped
-    Spans   []Span                    // OTel-shaped
-    Edges   []Edge                    // topology edges (see storage-and-query.md §6.3)
-    Window  TimeWindow                // [start, end) covered by this batch
-}
-
-type Source struct {
-    NodeName string
-    PodName  string                   // the agent pod
-    Cluster  string                   // operator-set
-}
-
-type TimeWindow struct {
-    Start time.Time
-    End   time.Time
-}
-```
+This document specifies how data leaves the system. Per ADR-0024, a "sink" is not a Go interface — it is a **wire endpoint**. Adding a sink requires no fork and no Go: you point the system at your endpoint, subscribe to a stream, or scrape us. The consumers named in the requirements (existing observability stacks, AI agents, the HPA) all speak these protocols natively.
 
-Sinks are free to subset — a Prometheus remote-write sink ignores `Spans` and `Edges`; an OTLP sink takes all three.
+## 1. The four egress surfaces
 
-Batches are immutable from the sink's perspective. Mutating the batch is a contract violation.
+| Surface | Direction | Protocol | Ships in |
+|---|---|---|---|
+| Prometheus scrape | pull | Prometheus text exposition on agent `:9090` | v0.3 ✅ |
+| Query API | pull | PromQL over HTTP (`/api/v1/query`, `/api/v1/query_range`) + `custom.metrics.k8s.io` on the query server | v0.5 (vertical slice) |
+| OTLP push | push | OTLP/gRPC and OTLP/HTTP to operator-configured endpoints | v0.5 (breadth) — [#97](https://github.com/gke-labs/in-cluster-observability/issues/97), [#98](https://github.com/gke-labs/in-cluster-observability/issues/98) |
+| Streaming subscribe | push (subscription) | gRPC server-stream with CEL filter, OTLP-encoded payloads | v0.5 (breadth) — [#99](https://github.com/gke-labs/in-cluster-observability/issues/99) |
 
-## 3. Registry
+Prometheus **remote-write** rides the OTLP push design as a sibling exporter (same queueing/backoff skeleton, different encoder); it shares #97/#98's fate rather than having its own row.
 
-```go
-// Stability: Stable
-type Registry interface {
-    Register(s Sink) error            // returns error on duplicate Name()
-    Unregister(name string) error
-    List() []Sink
+## 2. Prometheus scrape (shipped)
 
-    // Programmatic introspection for self-observability and admin endpoints.
-    Status(name string) (Status, error)
-}
+The agent serves the standard text exposition format on `:9090/metrics`: OBI-captured metrics re-emitted through the const-metric collector (temporality-corrected, full histograms — #153) plus `ollie_*` self-observability metrics. Auth is in-process TokenReview/SubjectAccessReview (`internal/scrapeauth`); the `ollie-metrics-reader` ClusterRole grants the nonResourceURL. Label surface is bounded by the `pkg/schema` forward-allowlist (#144), frozen by contract-test goldens.
 
-type Status struct {
-    Name             string
-    Type             []SinkType        // {Push, Pull, Streaming}
-    State            State             // Init | Starting | Running | Stopping | Stopped | Errored
-    LastErr          error
-    BatchesAccepted  uint64
-    BatchesDropped   uint64
-    BytesOut         uint64
-    LastWrite        time.Time
-}
-```
+This is the zero-integration path: point any existing Prometheus (or GMP, or an OTel collector's prometheus receiver) at the DaemonSet.
 
-`Registry` is one per process. The agent's writer calls `Registry.List()` once per batch and dispatches to all `PushSink`s. The query server iterates `PullSink`s at HTTP-mux setup. `StreamingSink`s are invoked by the streaming gRPC service on each client connection.
+## 3. Query API (v0.5 vertical slice)
 
-## 4. Backpressure and failure isolation
+The query server (`cmd/ollie-query`) exposes:
 
-A misbehaving sink **must not** take down the agent. The contract:
+- **`/api/v1/query`, `/api/v1/query_range`** — Prometheus-compatible HTTP API over the cluster-wide fan-out ([ADR-0025](decisions.md#adr-0025-v05-vertical-slice-implementation-decisions) §3, [`storage-and-query.md`](storage-and-query.md) §5). Any Grafana or PromQL client works unmodified. Responses carry `degraded`/`missing_nodes` annotations when agents miss the fan-out deadline.
+- **`custom.metrics.k8s.io/v1beta1`** — the aggregated API the HPA consumes ([`storage-and-query.md`](storage-and-query.md) §7). Metric path → PromQL templates come from a ConfigMap; operators add derived metrics by editing it, no recompilation.
 
-| Failure | Sink returns / does | Core does |
-|---|---|---|
-| Transient error (e.g. network) | `Write` returns non-nil error | Logs, increments `ollie_sink_errors_total{name,kind="transient"}`, retries the batch up to `retryMax` (default 3) with exponential backoff. After exhaustion, drops and increments `..._dropped_total` |
-| Backpressure / can't keep up | `Write` returns `sink.ErrDropped` | Logs at debug, increments `..._dropped_total`, moves on |
-| Panic | uncaught panic | Recovered by core's per-sink panic handler; sink moved to `Errored` state; not retried until `Restart()` or process restart |
-| Init failure | `Init` returns error | Sink is **not** registered into active rotation; logged at error; other sinks unaffected |
-| Slow `Subscribe` consumer | sink's channel fills | Core drops oldest events with a per-stream counter; consumer sees gaps marked in metadata |
+## 4. OTLP push (v0.5 breadth)
 
-The agent's hot path **never blocks on a sink**. Push delivery uses a bounded per-sink buffer (default 1024 batches) with the policy above; full buffer = drop, not wait.
+The agent pushes captured telemetry to operator-configured OTLP endpoints — the front door of every observability vendor and the OTel collector. Configuration is per-endpoint (URL, protocol gRPC|HTTP, headers for auth, compression, timeout); delivery is at-most-once with bounded buffering and exponential backoff. A slow or dead endpoint drops (with `ollie_export_dropped_total` accounting), never blocks capture.
 
-`PullSink.RegisterRoutes` runs at HTTP server setup; if it panics, that sink is excluded and the server continues with the others.
+Design details land with #97/#98; the queueing skeleton, self-obs metric names, and backpressure contract from the superseded in-process design carry over (bounded per-endpoint buffer, drop-not-block).
 
-## 5. Built-in sinks
+## 5. Streaming subscribe (v0.5 breadth)
 
-All built-ins live under `pkg/sink/<name>/`. Each is independently importable; the default binary registers the full set.
+A gRPC service on the query server for live consumers (AI agents primarily):
 
-### 5.1 OTLP push
+- `Subscribe(filter: CEL, kinds: [SPANS|EDGES|METRICS]) → stream` — long-lived server stream, payloads OTLP-encoded so downstream OTel tooling consumes them directly.
+- The query server compiles the CEL program once, fans the subscription out to node-local agents, and multiplexes the results.
 
-Package: `pkg/sink/otlp`. Implements `PushSink`.
+Slow consumers get bounded buffering and gap markers, not backpressure into the capture path. `iobsctl` ([#100](https://github.com/gke-labs/in-cluster-observability/issues/100)) is the first-party client of this surface.
 
-```go
-type Config struct {
-    Endpoint string             // "otel-collector:4317"
-    Insecure bool               // TLS off (dev)
-    Headers  map[string]string  // auth tokens, etc.
-    Timeout  time.Duration      // per-batch
-    Compression string          // "gzip" | "" 
-}
+## 6. Failure isolation
 
-func New(c Config) sink.PushSink
-```
+The invariant the old sink design encoded survives the move to the wire: **egress never takes down capture.**
 
-Translates `Batch.Metrics` to OTLP `ExportMetricsServiceRequest`, `Batch.Spans` to `ExportTraceServiceRequest`, and (since edges aren't OTel-native) emits edges as spans with a well-known `ollie.kind=edge` attribute. Uses `go.opentelemetry.io/otel/exporters/otlp/*` under the hood.
+| Failure | Behavior |
+|---|---|
+| Push endpoint down / slow | Bounded buffer, exponential backoff, drop after exhaustion; `ollie_export_errors_total` / `..._dropped_total` |
+| Scrape client stalls | Standard HTTP write timeout; connection dropped |
+| Streaming subscriber stalls | Oldest events dropped per-stream with gap markers; `ollie_stream_dropped_total` |
+| Query overload | Engine-level limits (max samples, timeout); `503` beyond concurrency cap |
 
-### 5.2 OTLP HTTP push
+## 7. Self-observability
 
-Package: `pkg/sink/otlphttp`. Same as above but over OTLP/HTTP.
-
-### 5.3 Prometheus remote-write
-
-Package: `pkg/sink/promremote`. Implements `PushSink` (metrics only — `Spans` and `Edges` ignored).
-
-```go
-type Config struct {
-    URL          string
-    BearerToken  string
-    BasicAuth    *BasicAuth
-    TLSConfig    *TLSConfig
-    QueueConfig  QueueConfig    // mirrors Prometheus remote-write tuning
-}
-```
-
-Wraps `github.com/prometheus/prometheus/storage/remote`. Honors `Retry-After`. Self-observability metrics use the standard Prometheus remote-write names so existing dashboards work.
-
-### 5.4 Prometheus scrape endpoint
-
-Package: `pkg/sink/promscrape`. Implements `PullSink`.
-
-`RegisterRoutes(mux)` mounts `/metrics` returning the standard Prometheus text exposition format, served directly from the tsdb HEAD via the storage's existing `/api/v1/query` plumbing repurposed. Scrape interval is set by whoever scrapes us; we don't poll.
-
-### 5.5 Custom Metrics API (HPA)
-
-Package: `pkg/sink/custommetrics`. Implements `PullSink`.
-
-`RegisterRoutes(mux)` mounts the `/apis/custom.metrics.k8s.io/v1beta1/...` paths and serves the K8s custom-metrics API. Translates incoming paths to PromQL templates per [`storage-and-query.md`](storage-and-query.md#7-server-side-aggregation-for-hpa), executes against `Deps.Query`, returns `MetricValueList` JSON. Requires the `APIService` install in [`operations.md`](operations.md).
-
-### 5.6 gRPC streaming
-
-Package: `pkg/sink/grpcstream`. Implements `StreamingSink`.
-
-Exposes a gRPC service with:
-- `StreamSpans(filter cel) → stream Span` — long-lived, fanned out across nodes
-- `StreamEdges(filter cel) → stream Edge`
-- `StreamMetrics(promql, step) → stream Sample` — long-lived range query
-
-`Subscribe(ctx, filter)` is called by the gRPC handler; the channel returned by the sink is forwarded to the client.
-
-The CLI (`otelctl`-equivalent in `cmd/iobsctl`) speaks this gRPC service.
-
-### 5.7 Built-in registration
-
-The default binary registers built-ins based on `obsapi.Config`:
-
-```go
-// internal pseudo-code
-if cfg.HasRole(RoleAgent) {
-    registry.Register(otlp.New(cfg.OTLP))
-    registry.Register(promremote.New(cfg.PromRemote))
-    registry.Register(promscrape.New())  // mounted on the agent's HTTP listener
-}
-if cfg.HasRole(RoleQuery) {
-    registry.Register(custommetrics.New())
-    registry.Register(grpcstream.New())
-}
-```
-
-Built-ins that an embedder doesn't want are disabled via config or by constructing the `App` without their default config block.
-
-## 6. Library vs controller mode
-
-There is one binary: `cmd/ollie`. The mode is set by:
-- The `--role` flag (`agent | controller | query | all`), or
-- `INCLUSTER_OBS_ROLE` env var, or
-- `obsapi.Config.Role` when used as a library.
-
-When used as a library, an embedder writes their own `main.go` and calls `obsapi.New(...).Run(ctx)`. All behavior is driven by which `Role` is selected and which sinks are registered.
-
-There is **no separate "library build" vs "binary build."** The default binary is itself a library consumer that lives in this repo (the `cmd/ollie` package).
-
-## 7. A complete third-party sink — worked example
-
-A sink that posts every captured `Span` as a JSON payload to a webhook URL. ~40 lines:
-
-```go
-package webhook
-
-import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "net/http"
-    "time"
-
-    "github.com/gke-labs/in-cluster-observability/pkg/sink"
-)
-
-type Sink struct {
-    url    string
-    client *http.Client
-    deps   sink.Deps
-}
-
-func New(url string) *Sink {
-    return &Sink{
-        url:    url,
-        client: &http.Client{Timeout: 5 * time.Second},
-    }
-}
-
-func (s *Sink) Name() string                           { return "webhook" }
-func (s *Sink) Init(_ context.Context, d sink.Deps) error { s.deps = d; return nil }
-func (s *Sink) Start(_ context.Context) error          { return nil }
-func (s *Sink) Stop(_ context.Context) error           { return nil }
-
-func (s *Sink) Write(ctx context.Context, b sink.Batch) error {
-    if len(b.Spans) == 0 {
-        return nil
-    }
-    body, err := json.Marshal(b.Spans)
-    if err != nil {
-        return fmt.Errorf("marshal: %w", err)
-    }
-    req, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.url, bytes.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    resp, err := s.client.Do(req)
-    if err != nil {
-        return err   // core retries
-    }
-    defer resp.Body.Close()
-    if resp.StatusCode >= 500 {
-        return fmt.Errorf("upstream: %s", resp.Status)
-    }
-    if resp.StatusCode == 429 {
-        return sink.ErrBackoff  // core honors with longer backoff
-    }
-    return nil
-}
-```
-
-Registration is one line in the embedder's `main.go`:
-
-```go
-app.Sinks().Register(webhook.New("https://hooks.example.com/spans"))
-```
-
-The sink inherits all the per-sink self-observability metrics for free. Adding richer behavior (e.g. an explicit retry policy, batching, auth) is local to the sink.
-
-## 8. Configuration
-
-Embedders configure sinks programmatically. The default binary reads a config file (YAML, see [`operations.md`](operations.md)) and instantiates the built-in sink configs from it. There is no global "registry config" file; each sink's config is its own struct, namespaced by sink name.
-
-```yaml
-# /etc/ollie/config.yaml — default binary
-sinks:
-  otlp:
-    endpoint: otel-collector.observability:4317
-    insecure: false
-  promremote:
-    url: https://prom.example.com/api/v1/write
-    bearerTokenFile: /var/run/secrets/prom-token
-  promscrape: {}       # enable with defaults
-  custommetrics: {}    # enable with defaults
-  grpcstream: {}       # enable with defaults
-```
-
-## 9. Self-observability
-
-Per-sink Prometheus metrics, prefixed `ollie_sink_*` and labeled by `name`:
+Egress metrics, all on the standard self-obs endpoint:
 
 | Metric | Type | Notes |
 |---|---|---|
-| `…_batches_total{name}` | counter | batches handed to sink |
-| `…_batches_dropped_total{name,reason}` | counter | reason ∈ {`buffer_full`, `retry_exhausted`, `panic`} |
-| `…_errors_total{name,kind}` | counter | kind ∈ {`transient`, `permanent`} |
-| `…_write_duration_seconds{name}` | histogram | per-batch sink latency |
-| `…_state{name}` | gauge | enum: 0 init / 1 starting / 2 running / 3 stopping / 4 stopped / 5 errored |
-| `…_subscribers{name}` | gauge | streaming sinks only |
-
-The `Registry.Status(name)` admin endpoint surfaces the same data via HTTP/JSON for operators who don't have Prometheus wired up yet.
-
-## 10. Versioning of the sink interface
-
-Per [`public-api.md`](public-api.md) §3:
-
-- The interfaces (`Lifecycle`, `PushSink`, `PullSink`, `StreamingSink`, `Sink`, `Registry`) and the types they reference (`Batch`, `Deps`, `Status`, `Source`, `TimeWindow`) are **Stable** from v1.0.
-- Adding fields to `Batch`, `Deps`, `Status` is backward-compatible (Go struct extension).
-- Adding new interfaces (e.g. a future `BatchPullSink`) is additive.
-- Removing or renaming any of the above is a MAJOR version bump.
-- The built-in sink configs (`otlp.Config`, etc.) are governed by their own package's stability tags. The OTLP and Prometheus sinks are Stable; new sinks may start Experimental.
+| `ollie_export_batches_total{endpoint}` | counter | OTLP/remote-write push |
+| `ollie_export_dropped_total{endpoint,reason}` | counter | reason ∈ {`buffer_full`, `retry_exhausted`} |
+| `ollie_export_errors_total{endpoint,kind}` | counter | kind ∈ {`transient`, `permanent`} |
+| `ollie_export_duration_seconds{endpoint}` | histogram | per-batch |
+| `ollie_stream_subscribers` | gauge | active subscriptions |
+| `ollie_stream_dropped_total{reason}` | counter | slow-consumer drops |
+| `ollie_query_duration_seconds{api}` | histogram | `promql` \| `custom_metrics` \| `subscribe` |
 
 ## Open questions
 
-1. **Per-record vs per-batch push.** Right now `PushSink.Write` takes a `Batch`. Some sinks want per-record callbacks. We could add a `RecordSink` interface later, but for v1 we believe `Batch` is right (amortizes overhead, sinks can iterate trivially). Revisit if a real use case demands it.
-2. **Sink-side filtering.** Should sinks declare CEL filters they want core to apply before invoking `Write`, saving them the work? Currently sinks filter internally. Filtering at core is an optimization not a correctness fix; defer.
-3. **Backpressure-aware StreamingSink.** Today `Subscribe` returns a channel; if the channel is unbuffered/small, core fills it and drops. A `Subscribe2(ctx, filter, sendFn func(Event) error) error` style might be cleaner. Decision deferred to first streaming-sink consumer at scale.
-4. **Sink discovery for embedders.** Should `pkg/sink/builtin` exist as a one-import "all built-ins" convenience? Probably yes once we have 5+ built-ins; punted until then.
+1. **Remote-write v2.** Start with v1 (universal) and add v2 (native histograms, metadata) when a consumer asks, or lead with v2? Decide in #97/#98 design.
+2. **Subscription resume.** Should `Subscribe` support a resume token so a reconnecting AI agent doesn't lose the gap? Defer to the first real consumer; gap markers make the loss visible meanwhile.
+3. **Egress config surface.** Push endpoints are operator config — flag/file on the agent vs. a field on `ClusterTrafficPolicy`. Leaning CRD (it's cluster operator intent); decide in #97.

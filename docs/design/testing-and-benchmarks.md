@@ -70,8 +70,8 @@ Live next to the component they test. Use fakes for boundaries the component doe
 
 - `pkg/capture` integration: in-memory event source feeding the adapter (no OBI, no kernel).
 - `pkg/controller` integration: `controller-runtime`'s `envtest` (real CRD server, no eBPF).
-- `pkg/store` integration: real tsdb HEAD against a tmp directory.
-- `pkg/sink/*` integration: each sink against a fake destination (httptest server for OTLP HTTP, in-process gRPC server for OTLP gRPC, etc).
+- `internal/store` integration: real tsdb against a tmp directory.
+- Egress integration: each surface against a fake destination (httptest server for OTLP HTTP, in-process gRPC server for OTLP gRPC and streaming subscribe, etc).
 
 Integration tests verify component-internal invariants and contracts with declared dependencies. They are not load tests.
 

@@ -1,6 +1,12 @@
 # Storage and Query
 
-**Status:** Draft, 2026-05-17
+**Status:** Draft, 2026-05-17 — **amended by [ADR-0025](decisions.md#adr-0025-v05-vertical-slice-implementation-decisions) (2026-07-29)** for the v0.5 vertical slice. Where this doc and ADR-0025 disagree, the ADR wins. The deltas:
+
+- The metric store is `internal/store` (not `pkg/store`, per ADR-0024) and embeds the full `tsdb.DB` via `tsdb.Open` with 2-min blocks / 10-min retention — not a raw `head.NewHead` (§2.1). The `Store`/`Engine` Go interfaces sketched in §2.4 and §4.1 were deleted with ADR-0024; the store's consumer is the binary.
+- Ingest is a 1 s self-scrape of the agent's in-process Prometheus registry (§2.4's event-dispatch write path assumed the enricher pipeline that ADR-0021 removed).
+- Fan-out is at the **storage layer**: agents serve raw series over gRPC, the query server merges and runs the stock PromQL engine centrally. §5.1's per-node partial-aggregation scheme is superseded (it mis-aggregates non-decomposable queries). §5.3's degraded/`missing_nodes` contract stands.
+- The span/edge ring buffer (§3) and its WAL (§3.4) are deferred past the vertical slice (#84, #79); CEL query surfaces (§4.2) land with them.
+
 **Owners:** TBD
 
 This document specifies the in-cluster store, the query engines on top of it, and the data schema. It implements [ADR-0002](decisions.md#adr-0002-in-cluster-store--prometheus-tsdb-head-block--parallel-ring-buffer), [ADR-0008](decisions.md#adr-0008-query-language), and [ADR-0012](decisions.md#adr-0012-tsdb-block-duration-and-wal-strategy), and satisfies requirements §2.3, §2.5, and §2.6 ([`docs/requirements.md`](../requirements.md)).

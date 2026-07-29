@@ -86,9 +86,9 @@ The principle: ship a focused v1 that hits requirements §1–§7 cleanly, then 
 
 **Motivation.** OTLP-collector + Prometheus remote-write covers the common case. For organizations using ClickHouse, S3-compatible blob, or specialized observability backends (Datadog, Honeycomb, NewRelic), each could be a first-party sink.
 
-**Path.**
-- Each new sink lives in `pkg/sink/<name>/` and follows the sink interface in [`sinks-and-extensibility.md`](sinks-and-extensibility.md).
-- Initially community-contributed; promote to "built-in maintained" tier based on adoption.
+**Path (amended by [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157)).**
+- Backends that speak OTLP or remote-write need nothing from us — they are already served by the built-in egress ([`sinks-and-extensibility.md`](sinks-and-extensibility.md)).
+- Backends with proprietary ingest become either built-in exporters behind config (first-party, this repo) or external bridges consuming the streaming subscribe API (community, any language).
 
 **Targets, rough priority:**
 

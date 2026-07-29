@@ -53,9 +53,9 @@ flowchart LR
 
 **Query Server (Deployment).** Stateless. Fans queries out to all registered agents in parallel, aggregates results, and serves them via three surfaces: HTTP/PromQL for general use, the `custom.metrics.k8s.io` APIService for HPA, and a gRPC streaming endpoint for AI agents and CLIs. Detail in [`storage-and-query.md`](storage-and-query.md).
 
-**Sinks.** First-class consumers of captured data. Built-in: OTLP gRPC + HTTP push, Prometheus remote-write + scrape endpoint, custom-metrics APIService, gRPC streaming. Third parties register their own via the public [`pkg/sink`](sinks-and-extensibility.md) interfaces. Sinks run **in-process** with whichever component owns the data they want (typically the agent for raw push, the query server for query-result-derived sinks).
+**Egress (per [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157)).** Data leaves over standard wire protocols, not in-process Go interfaces: OTLP gRPC + HTTP push to operator-configured endpoints, Prometheus scrape (+ remote-write), the PromQL HTTP API and custom-metrics APIService on the query server, and CEL-filtered gRPC streaming. "Adding a sink" means pointing the system at your endpoint or subscribing. Detail in [`sinks-and-extensibility.md`](sinks-and-extensibility.md).
 
-**Library surface (`pkg/*`).** The public Go API. Third parties import `pkg/capture`, `pkg/store`, `pkg/query`, `pkg/sink`, `pkg/topology`, `pkg/controller` to build their own binaries with custom sink registration. Detail in [`public-api.md`](public-api.md).
+**Public Go surface (`pkg/*`).** Deliberately small (per ADR-0024): `pkg/schema` (canonical label keys), `pkg/capture` (OBI bridge + OTLP translators), `pkg/controller` (CRD types + generated stubs). All Experimental. Detail in [`public-api.md`](public-api.md).
 
 ## 3. Data flow
 
