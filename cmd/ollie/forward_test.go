@@ -217,6 +217,68 @@ func TestCollector_LabelSchemaCoerced(t *testing.T) {
 	}
 }
 
+// A later datapoint carrying a key the first-seen point lacked must
+// widen the schema to the union, not drop the key forever (#170 review,
+// FIX F). The first series (no route) is migrated onto the widened
+// dimension with an empty route, and both series survive one scrape.
+func TestCollector_LabelSchemaWidens(t *testing.T) {
+	c := newTestCollector()
+	// First point pins the schema to {k8s_pod_name}.
+	c.Record(context.Background(), capture.MetricEvent{
+		Name: "http.server.request.duration.total", Type: capture.MetricTypeSum,
+		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 1,
+		Attributes: map[string]string{"k8s.pod.name": "a"},
+	})
+	// Second point of the same name adds http.route — must widen, not drop.
+	c.Record(context.Background(), capture.MetricEvent{
+		Name: "http.server.request.duration.total", Type: capture.MetricTypeSum,
+		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 2,
+		Attributes: map[string]string{"k8s.pod.name": "a", "http.route": "/users"},
+	})
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(c)
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("gather must not fail after widening: %v", err)
+	}
+	out := render(t, c)
+	if !strings.Contains(out, "http_route") {
+		t.Fatalf("widened key http_route missing; it was dropped:\n%s", out)
+	}
+	// The pod-only series and the routed series are distinct dimensions
+	// of the same name, both retained.
+	if n := testutil.CollectAndCount(c); n != 2 {
+		t.Fatalf("series count = %d, want 2 (pinned + routed)", n)
+	}
+}
+
+// L4 flow bytes carry a bare `direction` attribute (request|response|
+// unknown). It must be allowlisted and kept as a distinct label so the
+// two directions do not collapse to one last-write-wins series (#170
+// review). Two directional points of the same counter must expose two
+// series, each with its own total.
+func TestCollector_DirectionNotCollapsed(t *testing.T) {
+	c := newTestCollector()
+	c.Record(context.Background(), capture.MetricEvent{
+		Name: "obi.network.flow.bytes", Type: capture.MetricTypeSum,
+		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 100,
+		Attributes: map[string]string{"direction": "request"},
+	})
+	c.Record(context.Background(), capture.MetricEvent{
+		Name: "obi.network.flow.bytes", Type: capture.MetricTypeSum,
+		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 250,
+		Attributes: map[string]string{"direction": "response"},
+	})
+
+	out := render(t, c)
+	if !strings.Contains(out, "direction") {
+		t.Fatalf("direction label dropped; flows collapse:\n%s", out)
+	}
+	if n := testutil.CollectAndCount(c); n != 2 {
+		t.Fatalf("series count = %d, want 2 (request + response); direction collapsed", n)
+	}
+}
+
 // Allowlist behavior carried over from the pre-#153 forwarder (#144):
 // only schema.ForwardableLabel keys are re-emitted, and drops are
 // accounted on the self-obs counter.

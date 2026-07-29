@@ -66,6 +66,11 @@ type obiCollector struct {
 	droppedLabels metric.Int64Counter
 }
 
+// obiSeriesHelp is the HELP text on every re-emitted OBI series; it is
+// shared by the initial descriptor and the widened descriptor built
+// during a schema migration so both carry identical metadata.
+const obiSeriesHelp = "re-emitted from the sibling OBI container (ollie agent, #153)"
+
 type seriesKind uint8
 
 const (
@@ -123,9 +128,24 @@ func (c *obiCollector) Record(ctx context.Context, ev capture.MetricEvent) {
 	defer c.mu.Unlock()
 
 	schemaKeys, ok := c.labelSchema[name]
-	if !ok {
+	switch {
+	case !ok:
 		c.labelSchema[name] = keys
 		schemaKeys = keys
+	default:
+		// A later datapoint may carry keys the first-seen point lacked
+		// (e.g. an HTTP series that only sometimes has http.route, or an
+		// L4 flow whose first sample was one-sided). Pinning first-seen
+		// would silently drop those keys forever; instead widen the
+		// schema to the union and migrate existing series onto it
+		// (absent keys -> ""), so every datapoint's labels survive and
+		// all series of the name keep one consistent label dimension
+		// (#170 review, FIX F).
+		if u := unionKeys(schemaKeys, keys); !equalStrings(u, schemaKeys) {
+			c.rekeySeries(name, schemaKeys, u)
+			c.labelSchema[name] = u
+			schemaKeys = u
+		}
 	}
 	vals = coerceToSchema(schemaKeys, keys, vals)
 
@@ -133,9 +153,7 @@ func (c *obiCollector) Record(ctx context.Context, ev capture.MetricEvent) {
 	st, ok := c.series[key]
 	if !ok {
 		st = &obiSeries{
-			desc: prometheus.NewDesc(name,
-				"re-emitted from the sibling OBI container (ollie agent, #153)",
-				schemaKeys, nil),
+			desc:      prometheus.NewDesc(name, obiSeriesHelp, schemaKeys, nil),
 			labelVals: vals,
 		}
 		c.series[key] = st
@@ -262,6 +280,57 @@ func allowedLabels(attrs map[string]string) (keys, vals, dropped []string) {
 		vals[i] = attrs[k]
 	}
 	return keys, vals, dropped
+}
+
+// unionKeys returns the sorted union of two already-sorted key slices.
+func unionKeys(a, b []string) []string {
+	out := make([]string, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i] == b[j]:
+			out = append(out, a[i])
+			i++
+			j++
+		case a[i] < b[j]:
+			out = append(out, a[i])
+			i++
+		default:
+			out = append(out, b[j])
+			j++
+		}
+	}
+	out = append(out, a[i:]...)
+	out = append(out, b[j:]...)
+	return out
+}
+
+// rekeySeries migrates every stored series of metric `name` from the
+// old (narrower) schema to newKeys (a superset): each series' desc is
+// rebuilt on newKeys, its label values are re-aligned onto them (absent
+// keys -> ""), and its map key is recomputed so all series of the name
+// share one label dimension. Widening only adds keys, so two formerly-
+// distinct series can never collide onto one key. Caller holds c.mu.
+func (c *obiCollector) rekeySeries(name string, oldKeys, newKeys []string) {
+	prefix := name + "\x00"
+	type moved struct {
+		key string
+		st  *obiSeries
+	}
+	var pending []moved
+	for k, st := range c.series {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		newVals := coerceToSchema(newKeys, oldKeys, st.labelVals)
+		st.desc = prometheus.NewDesc(name, obiSeriesHelp, newKeys, nil)
+		st.labelVals = newVals
+		delete(c.series, k)
+		pending = append(pending, moved{key: name + "\x00" + strings.Join(newVals, "\x00"), st: st})
+	}
+	for _, m := range pending {
+		c.series[m.key] = m.st
+	}
 }
 
 // coerceToSchema maps (keys, vals) onto the pinned schema key set:

@@ -60,13 +60,18 @@ var (
 	ForwardAllowedLabelPrefixes = []string{"k8s.", "service.", "network.", "tcp."}
 
 	// ForwardAllowedLabelKeys admits individual low-cardinality,
-	// low-sensitivity HTTP dimensions. http.route is safe because the
-	// agent pins OBI's routes.unmatched to wildcard (see
-	// internal/obiconfig), which collapses unmatched paths to "/**".
+	// low-sensitivity dimensions that no prefix family covers.
+	// http.route is safe because the agent pins OBI's routes.unmatched
+	// to wildcard (see internal/obiconfig), which collapses unmatched
+	// paths to "/**". direction (request|response|unknown) is the L4
+	// flow half-of-connection on obi.network.flow.bytes; without it the
+	// two directions carry identical labels and collapse to a single
+	// series, last-write-wins over a monotonic counter (#170 review).
 	ForwardAllowedLabelKeys = []string{
 		"http.request.method",
 		"http.response.status_code",
 		"http.route",
+		"direction",
 	}
 )
 
