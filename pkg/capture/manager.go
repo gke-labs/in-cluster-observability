@@ -120,6 +120,13 @@ type Config struct {
 	// metrics. Defaults to capture.DefaultMeterProvider() when nil.
 	MeterProvider metric.MeterProvider
 
+	// RawTee, when non-nil, receives every OTLP payload exactly as
+	// it arrived from OBI, before translation (ADR-0026 §5–6). It
+	// feeds consumers that want the wire shape — the span ring and
+	// the export relays. Implementations MUST NOT block: they run on
+	// the receiver hot path.
+	RawTee RawTee
+
 	// InitialOpenPorts seeds OBI's discovery.instrument list with one
 	// synthetic "smoke" entry matching any process whose listening
 	// port is in this set. Format is OBI's native open_ports string:

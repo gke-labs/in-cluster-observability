@@ -505,6 +505,9 @@ func (h *bridgeHandler) OnMetrics(ctx context.Context, req *collmetricspb.Export
 	}
 	defer h.b.endEmit()
 	defer h.b.recoverPanic("receiver_metrics", ModuleL4TCP)
+	if tee := h.b.cfg.RawTee; tee != nil {
+		tee.RawMetrics(req)
+	}
 	for _, ev := range TranslateMetrics(req.GetResourceMetrics()) {
 		h.emit(ctx, ev)
 	}
@@ -517,6 +520,9 @@ func (h *bridgeHandler) OnTraces(ctx context.Context, req *colltracepb.ExportTra
 	}
 	defer h.b.endEmit()
 	defer h.b.recoverPanic("receiver_traces", ModuleHTTP1)
+	if tee := h.b.cfg.RawTee; tee != nil {
+		tee.RawTraces(req)
+	}
 	for _, ev := range TranslateTraces(req.GetResourceSpans()) {
 		h.emit(ctx, ev)
 	}
