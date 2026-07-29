@@ -248,6 +248,13 @@ spec:
           volumeMounts:
             - name: obi-config
               mountPath: /etc/ollie/obi-config
+            # Node-local metric store (v0.5, #78): tsdb blocks + WAL.
+            # emptyDir by design (ADR-0025) — with 10-minute retention
+            # there is nothing worth persisting across pod deletion,
+            # and the WAL still recovers container restarts within the
+            # pod's lifetime.
+            - name: ollie-data
+              mountPath: /var/lib/ollie
 
       volumes:
         - name: bpf
@@ -266,6 +273,9 @@ spec:
           emptyDir: {}
         - name: var-run-obi
           emptyDir: {}
+        - name: ollie-data
+          emptyDir:
+            sizeLimit: 1Gi
         - name: cgroup
           hostPath:
             path: /sys/fs/cgroup
