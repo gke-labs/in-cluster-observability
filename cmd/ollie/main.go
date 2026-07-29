@@ -296,7 +296,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "store close: %v\n", err)
 			}
 		}()
-		ing := store.NewIngester(st, promReg, promReg, time.Second, nil)
+		ing := store.NewIngester(st, promReg, promReg, time.Second, nil, *nodeName)
 		go ing.Run(ctx)
 		fmt.Fprintf(os.Stderr, "metric store: %s (2m blocks, 10m retention, 1s ingest)\n", *storeDir)
 

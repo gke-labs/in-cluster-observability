@@ -30,11 +30,22 @@ import (
 // registry and appending every sample (ADR-0025 §2: the same registry
 // backs the :9090 scrape endpoint, so what PromQL sees is exactly
 // what a scraper would see — one normalization path).
+// nodeLabel identifies the node that observed a stored series. The
+// query server fans out to every agent's store and merges the raw
+// series; without a per-node label, identical self-obs series
+// (ollie_agent_up, ollie_store_*) from different nodes carry the same
+// identity and collapse into one during the merge — a counter reset
+// storm under rate(), and a silently wrong active-series total. The
+// store is queried directly (no scraper in between to relabel target
+// identity), so it must self-identify its node (#170 review).
+const nodeLabel = "k8s_node_name"
+
 type Ingester struct {
 	store    *Store
 	gatherer prometheus.Gatherer
 	interval time.Duration
 	logger   *slog.Logger
+	nodeName string
 
 	samplesAppended prometheus.Counter
 	appendErrors    prometheus.Counter
@@ -44,8 +55,10 @@ type Ingester struct {
 // NewIngester wires an ingester gathering from g every interval
 // (default 1s). Self-observability metrics are registered on reg,
 // which is typically the same registry g gathers — the ollie_store_*
-// series then flow into the store like everything else.
-func NewIngester(s *Store, g prometheus.Gatherer, reg prometheus.Registerer, interval time.Duration, logger *slog.Logger) *Ingester {
+// series then flow into the store like everything else. nodeName, when
+// non-empty, is stamped onto every appended series as k8s_node_name so
+// the query server's cross-node merge keeps per-node series distinct.
+func NewIngester(s *Store, g prometheus.Gatherer, reg prometheus.Registerer, interval time.Duration, logger *slog.Logger, nodeName string) *Ingester {
 	if interval <= 0 {
 		interval = time.Second
 	}
@@ -57,6 +70,7 @@ func NewIngester(s *Store, g prometheus.Gatherer, reg prometheus.Registerer, int
 		gatherer: g,
 		interval: interval,
 		logger:   logger,
+		nodeName: nodeName,
 		samplesAppended: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ollie_store_samples_appended_total",
 			Help: "Samples appended to the node-local tsdb.",
@@ -106,10 +120,21 @@ func (ing *Ingester) Tick(ctx context.Context) {
 	for _, fam := range fams {
 		for _, m := range fam.GetMetric() {
 			for _, smp := range Flatten(fam, m) {
-				lb := labels.NewScratchBuilder(len(m.GetLabel()) + 2)
+				lb := labels.NewScratchBuilder(len(m.GetLabel()) + 3)
 				lb.Add(labels.MetricName, smp.Name)
+				hasNode := false
 				for _, lp := range m.GetLabel() {
+					if lp.GetName() == nodeLabel {
+						hasNode = true
+					}
 					lb.Add(lp.GetName(), lp.GetValue())
+				}
+				// Stamp the node identity unless the series already
+				// carries one (an OBI metric could, in principle);
+				// adding a duplicate label key would make the series
+				// invalid.
+				if ing.nodeName != "" && !hasNode {
+					lb.Add(nodeLabel, ing.nodeName)
 				}
 				if smp.Le != "" {
 					lb.Add(labels.BucketLabel, smp.Le)

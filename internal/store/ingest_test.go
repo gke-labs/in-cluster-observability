@@ -57,19 +57,19 @@ func TestIngesterTick(t *testing.T) {
 
 	reg.MustRegister(ctr, gauge, hist)
 
-	ing := NewIngester(s, reg, reg, time.Second, nil)
+	ing := NewIngester(s, reg, reg, time.Second, nil, "node-a")
 	ing.Tick(t.Context())
 	now := time.Now()
 
 	for q, want := range map[string]float64{
-		`test_ingest_requests_total{code="200"}`:                       3,
-		`test_ingest_requests_total{code="500"}`:                       1,
-		`test_ingest_up`:                                               1,
-		`test_ingest_duration_seconds_bucket{le="0.1"}`:                1,
-		`test_ingest_duration_seconds_bucket{le="1"}`:                  2,
-		`test_ingest_duration_seconds_bucket{le="+Inf"}`:               3,
-		`test_ingest_duration_seconds_count`:                           3,
-		`histogram_quantile(0.5, test_ingest_duration_seconds_bucket)`: 0.55,
+		`test_ingest_requests_total{code="200",k8s_node_name="node-a"}`: 3,
+		`test_ingest_requests_total{code="500"}`:                        1,
+		`test_ingest_up`:                                                1,
+		`test_ingest_duration_seconds_bucket{le="0.1"}`:                 1,
+		`test_ingest_duration_seconds_bucket{le="1"}`:                   2,
+		`test_ingest_duration_seconds_bucket{le="+Inf"}`:                3,
+		`test_ingest_duration_seconds_count`:                            3,
+		`histogram_quantile(0.5, test_ingest_duration_seconds_bucket)`:  0.55,
 	} {
 		vec := queryInstant(t, s, q, now)
 		if len(vec) != 1 {
@@ -91,5 +91,16 @@ func TestIngesterTick(t *testing.T) {
 	vec = queryInstant(t, s, `ollie_store_active_series`, time.Now())
 	if len(vec) != 1 || vec[0].F <= 0 {
 		t.Errorf("ollie_store_active_series = %v, want > 0", vec)
+	}
+
+	// Every stored series carries the node identity so the query
+	// server's cross-node merge keeps per-node series distinct.
+	vec = queryInstant(t, s, `test_ingest_up{k8s_node_name="node-a"}`, time.Now())
+	if len(vec) != 1 || vec[0].F != 1 {
+		t.Errorf(`test_ingest_up{k8s_node_name="node-a"} = %v, want 1`, vec)
+	}
+	vec = queryInstant(t, s, `test_ingest_up{k8s_node_name="node-b"}`, time.Now())
+	if len(vec) != 0 {
+		t.Errorf(`test_ingest_up{k8s_node_name="node-b"} = %v, want empty`, vec)
 	}
 }
