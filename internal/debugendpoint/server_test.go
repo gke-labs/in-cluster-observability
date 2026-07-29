@@ -142,7 +142,7 @@ func TestAllowPID_RejectsBadInput(t *testing.T) {
 }
 
 func TestExtraHandler_PromMetricsScrape(t *testing.T) {
-	mp, h, err := capture.NewPromMeterProvider()
+	mp, _, h, err := capture.NewPromMeterProvider()
 	if err != nil {
 		t.Fatalf("NewPromMeterProvider: %v", err)
 	}

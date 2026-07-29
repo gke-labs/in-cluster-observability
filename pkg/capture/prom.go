@@ -32,12 +32,15 @@ import (
 //
 // The MeterProvider should be passed into Config.MeterProvider so that
 // pkg/capture's self-observability counters end up scrape-visible.
+// The returned Registry is the one the handler serves — callers may
+// register additional prometheus.Collectors on it (the agent's OBI
+// re-emission collector does, #153).
 //
 // This is the v0.2 verification path; v0.3's Prometheus scrape sink
 // (#82) will subsume it with the full per-component metric surface.
 //
 // Stability: Experimental
-func NewPromMeterProvider() (*sdkmetric.MeterProvider, http.Handler, error) {
+func NewPromMeterProvider() (*sdkmetric.MeterProvider, *prometheus.Registry, http.Handler, error) {
 	reg := prometheus.NewRegistry()
 	exporter, err := otelprom.New(
 		otelprom.WithRegisterer(reg),
@@ -58,7 +61,7 @@ func NewPromMeterProvider() (*sdkmetric.MeterProvider, http.Handler, error) {
 		otelprom.WithoutScopeInfo(),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("capture: prometheus exporter: %w", err)
+		return nil, nil, nil, fmt.Errorf("capture: prometheus exporter: %w", err)
 	}
 	provider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(exporter),
@@ -71,7 +74,7 @@ func NewPromMeterProvider() (*sdkmetric.MeterProvider, http.Handler, error) {
 		Registry:          reg,
 		EnableOpenMetrics: true,
 	})
-	return provider, handler, nil
+	return provider, reg, handler, nil
 }
 
 // Compile-time check that metricdata is referenced (some IDEs prune
