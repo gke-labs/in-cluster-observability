@@ -78,6 +78,42 @@ spec:
       ports:
         - port: 9090
           protocol: TCP
+    # Query server -> agent remote-read fan-out (v0.5, #95). Pinned
+    # to query-server pods in this namespace; bearer-token auth on
+    # the endpoint is the identity layer (ollie-query-reader).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ollie
+              app.kubernetes.io/component: query
+      ports:
+        - port: 9091
+          protocol: TCP
+---
+# Query server (v0.5, #94): default-deny ingress with :9095 open to
+# any source. Access control is the bearer-token layer
+# (ollie-promql-reader); consumers are legitimately anywhere
+# (operators, AI agents, Grafana). Health probes bypass
+# NetworkPolicy (kubelet originates from the node).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollie-query-ingress
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ollie
+      app.kubernetes.io/component: query
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 9095
+          protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

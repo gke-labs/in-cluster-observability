@@ -23,4 +23,6 @@ resources:
   - crds/ollie.gke-labs.dev_clustertrafficpolicies.yaml
   - controller.yaml
   - daemonset.yaml
+  - agent-service.yaml
+  - query.yaml
   - networkpolicy.yaml

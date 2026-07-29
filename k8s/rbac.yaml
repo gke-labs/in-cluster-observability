@@ -117,3 +117,66 @@ subjects:
   - kind: ServiceAccount
     name: collector
     namespace: gmp-system
+---
+# Query-server fan-out authorization (v0.5, #95). The agent guards
+# its remote-read endpoint (/api/v1/read on :9091) with the same
+# in-process TokenReview + SubjectAccessReview as /metrics; remote
+# read is a POST, so the SAR verb is `post`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ollie-query-reader
+  labels:
+    app.kubernetes.io/name: ollie
+rules:
+  - nonResourceURLs: ["/api/v1/read"]
+    verbs: ["post"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ollie-query-reader
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ollie-query-reader
+subjects:
+  - kind: ServiceAccount
+    name: ollie-query
+    namespace: ollie-system
+---
+# The query server performs TokenReview + SubjectAccessReview for its
+# own /api/v1/* surface (bearer-token auth, mirroring the agent).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ollie-query-auth-delegator
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: ollie-query
+    namespace: ollie-system
+---
+# PromQL API consumers (v0.5, #94). Bind a ServiceAccount to this
+# ClusterRole to let it query /api/v1/query and /api/v1/query_range
+# on the query server. No default subjects: cluster operators grant
+# explicitly. (Loopback — e.g. port-forward — is exempt for
+# debugging.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ollie-promql-reader
+  labels:
+    app.kubernetes.io/name: ollie
+rules:
+  - nonResourceURLs: ["/api/v1/query", "/api/v1/query_range"]
+    verbs: ["get", "post"]

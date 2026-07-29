@@ -196,6 +196,12 @@ spec:
             # here even though in-cluster 'auto' resolves the same,
             # so the production posture is visible in the manifest.
             - --scrape-auth=token
+            # v0.5 store + fan-out read path (#78, #95). Explicit so
+            # the production posture is visible: tsdb on the
+            # ollie-data emptyDir, remote read on :9091 guarded by
+            # the same token auth as :9090 (ollie-query-reader).
+            - --store-dir=/var/lib/ollie/tsdb
+            - --query-addr=0.0.0.0:9091
           env:
             # Downward API: node name flows into the agent's
             # AgentHello so the controller can route per-pod deltas
@@ -207,6 +213,13 @@ spec:
           ports:
             - name: scrape
               containerPort: 9090
+              protocol: TCP
+            # Remote-read endpoint for the query server's PromQL
+            # fan-out (v0.5, #95). Same bearer-token posture as
+            # :9090; NetworkPolicy additionally pins ingress to
+            # query-server pods.
+            - name: remote-read
+              containerPort: 9091
               protocol: TCP
           # tcpSocket rather than httpGet (#155): /metrics requires a
           # bearer token in-cluster (--scrape-auth, #145) and kubelet
