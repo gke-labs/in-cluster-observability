@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -292,6 +293,17 @@ func (h *Handler) handleMetric(w http.ResponseWriter, r *http.Request) {
 		writeStatusError(w, http.StatusNotFound, fmt.Sprintf("no value for metric %q on %s/%s/%s (no matching series in the window)", metricName, ns, resourceArg, name))
 		return
 	}
+	// A finite value is required. histogram_quantile over idle traffic
+	// yields NaN, rate() over a single sample yields no points, and an
+	// arithmetic template can overflow to ±Inf; NewMilliQuantity would
+	// turn any of these into a garbage int64 the HPA scales on. Treat a
+	// non-finite result the same as no value (404), so the HPA holds
+	// its last-known replica count instead of chasing a bogus number.
+	val := vec[0].F
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		writeStatusError(w, http.StatusNotFound, fmt.Sprintf("metric %q on %s/%s/%s evaluated to a non-finite value (%v); no usable data in the window", metricName, ns, resourceArg, name, val))
+		return
+	}
 
 	dk := describedKinds[plural]
 	obj := corev1.ObjectReference{
@@ -311,7 +323,7 @@ func (h *Handler) handleMetric(w http.ResponseWriter, r *http.Request) {
 			DescribedObject: obj,
 			MetricName:      metricName,
 			Timestamp:       metav1.NewTime(now),
-			Value:           *resource.NewMilliQuantity(int64(vec[0].F*1000), resource.DecimalSI),
+			Value:           *resource.NewMilliQuantity(int64(val*1000), resource.DecimalSI),
 		}},
 	})
 }

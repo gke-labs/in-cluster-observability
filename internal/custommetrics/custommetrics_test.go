@@ -17,6 +17,7 @@ package custommetrics
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -148,6 +149,24 @@ func TestErrors(t *testing.T) {
 		}
 		if !strings.Contains(string(body), `"kind":"Status"`) {
 			t.Errorf("%s: error body not a metav1.Status: %s", path, body)
+		}
+	}
+}
+
+func TestNonFiniteValue(t *testing.T) {
+	// histogram_quantile over idle traffic yields NaN; arithmetic
+	// templates can overflow to ±Inf. Either must be treated as "no
+	// value" (404) so the HPA holds its replica count rather than
+	// scaling on a garbage int64 from NewMilliQuantity.
+	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		eval := &fakeEval{vec: promql.Vector{{F: f}}}
+		h := newHandler(t, eval, "")
+		code, body := do(t, h, basePath+"/namespaces/shop/deployments/backend/latency_p99")
+		if code != http.StatusNotFound {
+			t.Fatalf("value %v: code = %d (want 404) body=%s", f, code, body)
+		}
+		if !strings.Contains(string(body), `"kind":"Status"`) {
+			t.Fatalf("value %v: error body not a metav1.Status: %s", f, body)
 		}
 	}
 }
