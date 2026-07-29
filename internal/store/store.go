@@ -115,6 +115,12 @@ func (s *Store) Queryable() storage.Queryable {
 	return s.db
 }
 
+// ReadQueryable exposes the store to the Prometheus remote-read
+// handler, which wants chunk access for the streamed response type.
+func (s *Store) ReadQueryable() storage.SampleAndChunkQueryable {
+	return s.db
+}
+
 // NumActiveSeries reports the number of series currently in the head
 // block.
 func (s *Store) NumActiveSeries() uint64 {

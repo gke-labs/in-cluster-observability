@@ -30,6 +30,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -38,6 +39,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/storage/remote"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"k8s.io/client-go/kubernetes"
@@ -66,6 +69,7 @@ func main() {
 	scrapeAuthAudiences := flag.String("scrape-auth-audiences", "", "comma-separated token audiences required by --scrape-auth=token (projected-token binding). Empty accepts standard API-server-audience tokens — required for managed collectors (GMP), which can't mint custom audiences.")
 	controllerAddr := flag.String("controller-addr", "", "gRPC target for the v0.4 ollie-controller (e.g. ollie-controller.ollie-system.svc:9102). Empty disables the controller client; agent runs in standalone v0.3 mode (--obi-instrument-ports seed).")
 	storeDir := flag.String("store-dir", "/var/lib/ollie/tsdb", "data directory for the node-local metric store (tsdb blocks + WAL, per ADR-0025; the DaemonSet mounts an emptyDir here). Empty disables the store.")
+	queryAddr := flag.String("query-addr", "0.0.0.0:9091", "bind address for the Prometheus remote-read endpoint at /api/v1/read, serving the node-local store to the query server's fan-out (#95). Empty (or a disabled store) disables it. Auth follows --scrape-auth: token mode requires `post` on nonResourceURL /api/v1/read (granted to the query server's SA by the ollie-query-reader ClusterRole).")
 	nodeName := flag.String("node-name", os.Getenv("KUBE_NODE_NAME"), "K8s node this agent runs on. Defaults to $KUBE_NODE_NAME (populated via Downward API in k8s/daemonset.yaml).")
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
 	debugAddr := flag.String("debug-endpoint-addr", debugendpoint.DefaultAddr, "loopback bind address for the debug endpoint")
@@ -205,6 +209,39 @@ func main() {
 		ing := store.NewIngester(st, promReg, promReg, time.Second, nil)
 		go ing.Run(ctx)
 		fmt.Fprintf(os.Stderr, "metric store: %s (2m blocks, 10m retention, 1s ingest)\n", *storeDir)
+
+		// Remote-read endpoint (#95, ADR-0025 §3): the query server
+		// fans PromQL reads out to this per-node endpoint and merges
+		// the raw series. Same auth posture as the scrape endpoint.
+		if *queryAddr != "" {
+			rh := remote.NewReadHandler(slog.Default(), nil, st.ReadQueryable(),
+				func() config.Config { return config.Config{} },
+				5e7 /* sample limit, matches Prometheus's default */, 10, 1<<20)
+			readHandler, err := buildScrapeHandler(rh, *scrapeAuth, *scrapeAuthAudiences)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "read auth init failed: %v\n", err)
+				os.Exit(1)
+			}
+			readMux := http.NewServeMux()
+			readMux.Handle("/api/v1/read", readHandler)
+			rl, err := net.Listen("tcp", *queryAddr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "read listen %s: %v\n", *queryAddr, err)
+				os.Exit(1)
+			}
+			readServer := &http.Server{Handler: readMux, ReadHeaderTimeout: 5 * time.Second}
+			go func() {
+				if err := readServer.Serve(rl); err != nil && err != http.ErrServerClosed {
+					fmt.Fprintf(os.Stderr, "read server: %v\n", err)
+				}
+			}()
+			defer func() {
+				rCtx, rCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer rCancel()
+				_ = readServer.Shutdown(rCtx)
+			}()
+			fmt.Fprintf(os.Stderr, "remote-read endpoint: http://%s/api/v1/read\n", rl.Addr())
+		}
 	} else {
 		fmt.Fprintln(os.Stderr, "metric store: disabled (--store-dir empty)")
 	}
