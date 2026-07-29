@@ -45,6 +45,7 @@ import (
 
 	"github.com/gke-labs/in-cluster-observability/internal/debugendpoint"
 	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
+	"github.com/gke-labs/in-cluster-observability/internal/store"
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
 )
 
@@ -64,6 +65,7 @@ func main() {
 	scrapeAuth := flag.String("scrape-auth", "auto", "authn/authz for the scrape endpoint (#145): 'token' requires a bearer token, validated via TokenReview + SubjectAccessReview for `get` on nonResourceURL /metrics (grant via the ollie-metrics-reader ClusterRole; fail-closed); 'none' disables auth; 'auto' picks token when running in-cluster, none otherwise. Loopback requests are always exempt (pod-internal debugging).")
 	scrapeAuthAudiences := flag.String("scrape-auth-audiences", "", "comma-separated token audiences required by --scrape-auth=token (projected-token binding). Empty accepts standard API-server-audience tokens — required for managed collectors (GMP), which can't mint custom audiences.")
 	controllerAddr := flag.String("controller-addr", "", "gRPC target for the v0.4 ollie-controller (e.g. ollie-controller.ollie-system.svc:9102). Empty disables the controller client; agent runs in standalone v0.3 mode (--obi-instrument-ports seed).")
+	storeDir := flag.String("store-dir", "/var/lib/ollie/tsdb", "data directory for the node-local metric store (tsdb blocks + WAL, per ADR-0025; the DaemonSet mounts an emptyDir here). Empty disables the store.")
 	nodeName := flag.String("node-name", os.Getenv("KUBE_NODE_NAME"), "K8s node this agent runs on. Defaults to $KUBE_NODE_NAME (populated via Downward API in k8s/daemonset.yaml).")
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
 	debugAddr := flag.String("debug-endpoint-addr", debugendpoint.DefaultAddr, "loopback bind address for the debug endpoint")
@@ -183,6 +185,28 @@ func main() {
 		}
 		defer dbg.Stop(context.Background())
 		fmt.Fprintf(os.Stderr, "debug endpoint enabled on %s (loopback); /debug/metrics serves agent self-obs\n", actualAddr)
+	}
+
+	// Node-local metric store (v0.5, #78 / ADR-0025): a tsdb fed by a
+	// 1s self-scrape of promReg, so PromQL over the store sees exactly
+	// what the :9090 scrape endpoint serves. The query server fans
+	// reads out across the per-node stores (phase 2).
+	if *storeDir != "" {
+		st, err := store.New(store.Config{Dir: *storeDir})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "store init failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer func() {
+			if err := st.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "store close: %v\n", err)
+			}
+		}()
+		ing := store.NewIngester(st, promReg, promReg, time.Second, nil)
+		go ing.Run(ctx)
+		fmt.Fprintf(os.Stderr, "metric store: %s (2m blocks, 10m retention, 1s ingest)\n", *storeDir)
+	} else {
+		fmt.Fprintln(os.Stderr, "metric store: disabled (--store-dir empty)")
 	}
 
 	// Forwarder + writer: re-emit each MetricEvent into the OTel SDK
