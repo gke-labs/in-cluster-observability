@@ -15,9 +15,12 @@
 package main
 
 import (
+	"strings"
+
 	collmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	colltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 
+	"github.com/gke-labs/in-cluster-observability/internal/export"
 	"github.com/gke-labs/in-cluster-observability/internal/store"
 )
 
@@ -27,14 +30,34 @@ import (
 // non-blocking per the capture.RawTee contract.
 type agentRawTee struct {
 	spans *store.SpanBuffer
+	otlp  *export.OTLPRelays
 }
 
-func (t *agentRawTee) RawMetrics(_ *collmetricspb.ExportMetricsServiceRequest) {
-	// Export relay consumer lands in the egress phase (#97/#98).
+func (t *agentRawTee) RawMetrics(req *collmetricspb.ExportMetricsServiceRequest) {
+	if t.otlp != nil {
+		t.otlp.Metrics.Enqueue(req)
+	}
 }
 
 func (t *agentRawTee) RawTraces(req *colltracepb.ExportTraceServiceRequest) {
 	if t.spans != nil {
 		t.spans.AppendRequest(req)
 	}
+	if t.otlp != nil {
+		t.otlp.Traces.Enqueue(req)
+	}
+}
+
+// parseHeaders parses "k=v,k2=v2" flag syntax.
+func parseHeaders(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, kv := range strings.Split(s, ",") {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return out
 }

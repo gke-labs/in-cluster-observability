@@ -454,3 +454,7 @@ func (h *Harness) saveArtifact(name, content string) {
 	}
 	h.t.Logf("--- %s ---\n%s", name, content)
 }
+
+// collectorImage is the OTel collector used by the export e2e test.
+// Pinned like the OBI image; bump deliberately.
+const collectorImage = "otel/opentelemetry-collector:0.111.0"

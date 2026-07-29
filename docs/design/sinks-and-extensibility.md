@@ -10,11 +10,10 @@ This document specifies how data leaves the system. Per ADR-0024, a "sink" is no
 | Surface | Direction | Protocol | Ships in |
 |---|---|---|---|
 | Prometheus scrape | pull | Prometheus text exposition on agent `:9090` | v0.3 ✅ |
-| Query API | pull | PromQL over HTTP (`/api/v1/query`, `/api/v1/query_range`) + `custom.metrics.k8s.io` on the query server | v0.5 (vertical slice) |
-| OTLP push | push | OTLP/gRPC and OTLP/HTTP to operator-configured endpoints | v0.5 (breadth) — [#97](https://github.com/gke-labs/in-cluster-observability/issues/97), [#98](https://github.com/gke-labs/in-cluster-observability/issues/98) |
+| Query API | pull | PromQL over HTTP (`/api/v1/query`, `/api/v1/query_range`) + `custom.metrics.k8s.io` on the query server; agents also serve standard remote read on `:9091` | v0.5 ✅ (#94–#96) |
+| OTLP push | push | OTLP/gRPC and OTLP/HTTP to operator-configured endpoints (`--export-otlp-*`) | v0.5 ✅ (#97, #98) |
+| Remote write | push | Prometheus remote-write v1 (`--export-remote-write-url`), same sample stream the local store ingests | v0.5 ✅ |
 | Streaming subscribe | push (subscription) | gRPC server-stream with CEL filter, OTLP-encoded payloads | v0.5 (breadth) — [#99](https://github.com/gke-labs/in-cluster-observability/issues/99) |
-
-Prometheus **remote-write** rides the OTLP push design as a sibling exporter (same queueing/backoff skeleton, different encoder); it shares #97/#98's fate rather than having its own row.
 
 ## 2. Prometheus scrape (shipped)
 
@@ -29,11 +28,13 @@ The query server (`cmd/ollie-query`) exposes:
 - **`/api/v1/query`, `/api/v1/query_range`** — Prometheus-compatible HTTP API over the cluster-wide fan-out ([ADR-0025](decisions.md#adr-0025-v05-vertical-slice-implementation-decisions) §3, [`storage-and-query.md`](storage-and-query.md) §5). Any Grafana or PromQL client works unmodified. Responses carry `degraded`/`missing_nodes` annotations when agents miss the fan-out deadline.
 - **`custom.metrics.k8s.io/v1beta1`** — the aggregated API the HPA consumes ([`storage-and-query.md`](storage-and-query.md) §7). Metric path → PromQL templates come from a ConfigMap; operators add derived metrics by editing it, no recompilation.
 
-## 4. OTLP push (v0.5 breadth)
+## 4. OTLP push + remote write (shipped, `internal/export`)
 
-The agent pushes captured telemetry to operator-configured OTLP endpoints — the front door of every observability vendor and the OTel collector. Configuration is per-endpoint (URL, protocol gRPC|HTTP, headers for auth, compression, timeout); delivery is at-most-once with bounded buffering and exponential backoff. A slow or dead endpoint drops (with `ollie_export_dropped_total` accounting), never blocks capture.
+The agent relays the **original OTLP payloads** it receives from OBI to an operator-configured endpoint (ADR-0026 §6 — no re-encoding): `--export-otlp-endpoint` with protocol gRPC|HTTP, headers, gzip, timeout. Delivery is at-most-once: bounded per-endpoint queue (1024 batches), drop-on-full, three attempts with exponential backoff, 4xx dropped as permanent. A slow or dead endpoint drops (with `ollie_export_dropped_total` accounting), never blocks capture.
 
-Design details land with #97/#98; the queueing skeleton, self-obs metric names, and backpressure contract from the superseded in-process design carry over (bounded per-endpoint buffer, drop-not-block).
+Prometheus **remote-write v1** (`--export-remote-write-url`) snapshots the agent's gathered-sample stream — the same one the local tsdb ingests and `:9090` serves — on `--export-remote-write-interval` (default 15 s) and pushes snappy-compressed `WriteRequest`s through the identical queue/backoff skeleton.
+
+Endpoint configuration via CRD (`ClusterTrafficPolicy`) remains open question 3, waiting on a control-plane consumer.
 
 ## 5. Streaming subscribe (v0.5 breadth)
 

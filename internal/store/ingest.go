@@ -105,20 +105,20 @@ func (ing *Ingester) Tick(ctx context.Context) {
 	var appended, failed int
 	for _, fam := range fams {
 		for _, m := range fam.GetMetric() {
-			for _, smp := range flatten(fam, m) {
+			for _, smp := range Flatten(fam, m) {
 				lb := labels.NewScratchBuilder(len(m.GetLabel()) + 2)
-				lb.Add(labels.MetricName, smp.name)
+				lb.Add(labels.MetricName, smp.Name)
 				for _, lp := range m.GetLabel() {
 					lb.Add(lp.GetName(), lp.GetValue())
 				}
-				if smp.le != "" {
-					lb.Add(labels.BucketLabel, smp.le)
+				if smp.Le != "" {
+					lb.Add(labels.BucketLabel, smp.Le)
 				}
-				if smp.quantile != "" {
-					lb.Add("quantile", smp.quantile)
+				if smp.Quantile != "" {
+					lb.Add("quantile", smp.Quantile)
 				}
 				lb.Sort()
-				if _, err := app.Append(0, lb.Labels(), ts, smp.value); err != nil {
+				if _, err := app.Append(0, lb.Labels(), ts, smp.Value); err != nil {
 					failed++
 					continue
 				}
@@ -137,62 +137,64 @@ func (ing *Ingester) Tick(ctx context.Context) {
 	}
 }
 
-// sample is one flattened time series value derived from a dto
-// metric.
-type sample struct {
-	name     string
-	value    float64
-	le       string // histogram bucket bound, when non-empty
-	quantile string // summary quantile, when non-empty
+// Sample is one flattened time series value derived from a dto
+// metric. Shared by the tsdb ingester and the remote-write exporter
+// so both surfaces emit identical series (ADR-0025 §2 one
+// normalization path).
+type Sample struct {
+	Name     string
+	Value    float64
+	Le       string // histogram bucket bound, when non-empty
+	Quantile string // summary quantile, when non-empty
 }
 
-// flatten expands a dto.Metric into the same series a Prometheus
+// Flatten expands a dto.Metric into the same series a Prometheus
 // scrape of the text exposition would produce: counters and gauges
 // map 1:1, histograms expand to _bucket/_sum/_count, summaries to
 // quantile series plus _sum/_count.
-func flatten(fam *dto.MetricFamily, m *dto.Metric) []sample {
+func Flatten(fam *dto.MetricFamily, m *dto.Metric) []Sample {
 	name := fam.GetName()
 	switch fam.GetType() {
 	case dto.MetricType_COUNTER:
-		return []sample{{name: name, value: m.GetCounter().GetValue()}}
+		return []Sample{{Name: name, Value: m.GetCounter().GetValue()}}
 	case dto.MetricType_GAUGE:
-		return []sample{{name: name, value: m.GetGauge().GetValue()}}
+		return []Sample{{Name: name, Value: m.GetGauge().GetValue()}}
 	case dto.MetricType_HISTOGRAM:
 		h := m.GetHistogram()
-		out := make([]sample, 0, len(h.GetBucket())+3)
+		out := make([]Sample, 0, len(h.GetBucket())+3)
 		infSeen := false
 		for _, b := range h.GetBucket() {
 			ub := b.GetUpperBound()
-			out = append(out, sample{
-				name:  name + "_bucket",
-				value: float64(b.GetCumulativeCount()),
-				le:    formatBound(ub),
+			out = append(out, Sample{
+				Name:  name + "_bucket",
+				Value: float64(b.GetCumulativeCount()),
+				Le:    formatBound(ub),
 			})
 			if math.IsInf(ub, +1) {
 				infSeen = true
 			}
 		}
 		if !infSeen {
-			out = append(out, sample{name: name + "_bucket", value: float64(h.GetSampleCount()), le: "+Inf"})
+			out = append(out, Sample{Name: name + "_bucket", Value: float64(h.GetSampleCount()), Le: "+Inf"})
 		}
 		out = append(out,
-			sample{name: name + "_sum", value: h.GetSampleSum()},
-			sample{name: name + "_count", value: float64(h.GetSampleCount())},
+			Sample{Name: name + "_sum", Value: h.GetSampleSum()},
+			Sample{Name: name + "_count", Value: float64(h.GetSampleCount())},
 		)
 		return out
 	case dto.MetricType_SUMMARY:
 		s := m.GetSummary()
-		out := make([]sample, 0, len(s.GetQuantile())+2)
+		out := make([]Sample, 0, len(s.GetQuantile())+2)
 		for _, q := range s.GetQuantile() {
-			out = append(out, sample{name: name, value: q.GetValue(), quantile: formatBound(q.GetQuantile())})
+			out = append(out, Sample{Name: name, Value: q.GetValue(), Quantile: formatBound(q.GetQuantile())})
 		}
 		out = append(out,
-			sample{name: name + "_sum", value: s.GetSampleSum()},
-			sample{name: name + "_count", value: float64(s.GetSampleCount())},
+			Sample{Name: name + "_sum", Value: s.GetSampleSum()},
+			Sample{Name: name + "_count", Value: float64(s.GetSampleCount())},
 		)
 		return out
 	case dto.MetricType_UNTYPED:
-		return []sample{{name: name, value: m.GetUntyped().GetValue()}}
+		return []Sample{{Name: name, Value: m.GetUntyped().GetValue()}}
 	default:
 		return nil
 	}

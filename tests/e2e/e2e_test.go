@@ -218,3 +218,117 @@ spec:
 			return out == "2" || out == "3"
 		})
 }
+
+// TestOTLPExport is #97/#98's end-to-end gate: the agent relays the
+// raw OTLP it receives from OBI to an in-cluster OpenTelemetry
+// collector, and a dead endpoint degrades to counted drops without
+// touching capture.
+func TestOTLPExport(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, "ollie-e2e")
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+
+	// A minimal collector: OTLP in, debug-log out.
+	h.PullAndLoad(collectorImage)
+	h.ApplyStdin(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otelcol-config
+  namespace: default
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    exporters:
+      debug:
+        verbosity: normal
+    service:
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          exporters: [debug]
+        traces:
+          receivers: [otlp]
+          exporters: [debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: otel-collector}
+  template:
+    metadata:
+      labels: {app: otel-collector}
+    spec:
+      containers:
+        - name: collector
+          image: ` + collectorImage + `
+          imagePullPolicy: Never
+          args: ["--config=/etc/otelcol/config.yaml"]
+          volumeMounts:
+            - {name: config, mountPath: /etc/otelcol}
+      volumes:
+        - name: config
+          configMap: {name: otelcol-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: default
+spec:
+  selector: {app: otel-collector}
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: 4317}
+`)
+	h.WaitRollout("deployment", "otel-collector", "default", 2*time.Minute)
+
+	// Point the agent's relay at it and generate traffic.
+	h.KubectlRetry(3, "patch", "daemonset", "ollie-agent", "-n", "ollie-system", "--type=json",
+		"-p", `[{"op":"add","path":"/spec/template/spec/containers/1/args/-","value":"--export-otlp-endpoint=otel-collector.default.svc.cluster.local:4317"}]`)
+	h.WaitRollout("daemonset", "ollie-agent", "ollie-system", 5*time.Minute)
+	h.DeployTestWorkload()
+
+	// The debug exporter logs one line per received batch.
+	h.PollKubectl(4*time.Minute, "collector logs OTLP metrics from the agent",
+		func() (string, error) {
+			return h.KubectlOutput("logs", "-n", "default", "deploy/otel-collector", "--tail=200")
+		},
+		func(out string) bool { return strings.Contains(out, "data points") })
+	h.PollKubectl(3*time.Minute, "collector logs OTLP traces from the agent",
+		func() (string, error) {
+			return h.KubectlOutput("logs", "-n", "default", "deploy/otel-collector", "--tail=200")
+		},
+		func(out string) bool { return strings.Contains(out, "spans") })
+
+	// Kill the collector: the relay degrades to accounted drops and
+	// the agent stays alive (#97 acceptance).
+	h.Kubectl("scale", "deployment/otel-collector", "-n", "default", "--replicas=0")
+	base := h.PortForward("ds/ollie-agent", "ollie-system", 19092, 9090)
+	h.PollHTTP(base+"/metrics", 4*time.Minute, "export drops counted after collector death",
+		func(body string) bool {
+			return strings.Contains(body, "ollie_export_dropped_total") ||
+				strings.Contains(body, `ollie_export_errors_total`)
+		})
+	// Capture is unharmed: the scrape surface still serves.
+	h.PollHTTP(base+"/metrics", 1*time.Minute, "agent alive after export endpoint death",
+		func(body string) bool { return strings.Contains(body, "ollie_agent_up") })
+}

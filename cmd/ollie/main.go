@@ -47,6 +47,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/gke-labs/in-cluster-observability/internal/debugendpoint"
+	"github.com/gke-labs/in-cluster-observability/internal/export"
 	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
 	"github.com/gke-labs/in-cluster-observability/internal/store"
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
@@ -71,6 +72,14 @@ func main() {
 	storeDir := flag.String("store-dir", "/var/lib/ollie/tsdb", "data directory for the node-local metric store (tsdb blocks + WAL, per ADR-0025; the DaemonSet mounts an emptyDir here). Empty disables the store.")
 	queryAddr := flag.String("query-addr", "0.0.0.0:9091", "bind address for the Prometheus remote-read endpoint at /api/v1/read, serving the node-local store to the query server's fan-out (#95). Empty (or a disabled store) disables it. Auth follows --scrape-auth: token mode requires `post` on nonResourceURL /api/v1/read (granted to the query server's SA by the ollie-query-reader ClusterRole).")
 	spanRingCapacity := flag.Int("span-ring-capacity", 65536, "capacity of the in-memory span ring fed by OBI's raw trace stream (#84, ADR-0026 §5). 0 disables the ring.")
+	exportOTLPEndpoint := flag.String("export-otlp-endpoint", "", "OTLP endpoint to relay captured telemetry to (#97/#98, ADR-0026 §6): host:port for grpc, base URL for http. The ORIGINAL payloads received from OBI are forwarded — no re-encoding. Empty disables. Delivery is at-most-once: bounded queue, drop-on-full, 3 attempts with backoff (ollie_export_* metrics account for every drop).")
+	exportOTLPProtocol := flag.String("export-otlp-protocol", "grpc", "OTLP relay protocol: grpc or http")
+	exportOTLPHeaders := flag.String("export-otlp-headers", "", "comma-separated key=value headers attached to every OTLP export (auth tokens etc.)")
+	exportOTLPCompression := flag.String("export-otlp-compression", "", "OTLP relay compression: gzip or empty")
+	exportOTLPTimeout := flag.Duration("export-otlp-timeout", 10*time.Second, "per-attempt OTLP delivery timeout")
+	exportRWURL := flag.String("export-remote-write-url", "", "Prometheus remote-write v1 endpoint to push the agent's metric state to (ADR-0026 §6). Snapshots the same gathered-sample stream the local store ingests, every --export-remote-write-interval. Empty disables.")
+	exportRWHeaders := flag.String("export-remote-write-headers", "", "comma-separated key=value headers for remote write")
+	exportRWInterval := flag.Duration("export-remote-write-interval", 15*time.Second, "remote-write snapshot cadence")
 	nodeName := flag.String("node-name", os.Getenv("KUBE_NODE_NAME"), "K8s node this agent runs on. Defaults to $KUBE_NODE_NAME (populated via Downward API in k8s/daemonset.yaml).")
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
 	debugAddr := flag.String("debug-endpoint-addr", debugendpoint.DefaultAddr, "loopback bind address for the debug endpoint")
@@ -116,17 +125,54 @@ func main() {
 		))
 	}
 
-	// Span ring (#84): holds the raw OTLP spans OBI emits, feeding
-	// live subscribers (#99) and ad-hoc reads (#100). Wired as a raw
-	// tee on the capture bridge so entries keep OTLP field paths.
+	// Raw-tee consumers (ADR-0026 §5–6): the span ring (#84) and the
+	// OTLP export relays (#97/#98) both take OBI's payloads in wire
+	// shape, straight off the bridge.
+	tee := &agentRawTee{}
 	var spanBuf *store.SpanBuffer
-	var rawTee capture.RawTee
 	if *spanRingCapacity > 0 {
 		spanBuf = store.NewSpanBuffer(*spanRingCapacity, promReg)
-		rawTee = &agentRawTee{spans: spanBuf}
+		tee.spans = spanBuf
 		fmt.Fprintf(os.Stderr, "span ring: capacity %d\n", *spanRingCapacity)
 	}
 	_ = spanBuf // read path lands with the stream service (#99)
+
+	var exportMetrics *export.Metrics
+	if *exportOTLPEndpoint != "" || *exportRWURL != "" {
+		exportMetrics = export.NewMetrics(promReg)
+	}
+	if *exportOTLPEndpoint != "" {
+		relays, err := export.NewOTLPRelays(export.OTLPConfig{
+			Endpoint:    *exportOTLPEndpoint,
+			Protocol:    *exportOTLPProtocol,
+			Headers:     parseHeaders(*exportOTLPHeaders),
+			Compression: *exportOTLPCompression,
+			Timeout:     *exportOTLPTimeout,
+			Metrics:     exportMetrics,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "otlp export init failed: %v\n", err)
+			os.Exit(1)
+		}
+		tee.otlp = relays
+		go relays.Run(ctx)
+		fmt.Fprintf(os.Stderr, "otlp export: %s (%s)\n", *exportOTLPEndpoint, *exportOTLPProtocol)
+	}
+	if *exportRWURL != "" {
+		rw := export.NewRemoteWriter(export.RemoteWriteConfig{
+			URL:      *exportRWURL,
+			Headers:  parseHeaders(*exportRWHeaders),
+			Interval: *exportRWInterval,
+			Gatherer: promReg,
+			Metrics:  exportMetrics,
+		})
+		go rw.Run(ctx)
+		fmt.Fprintf(os.Stderr, "remote-write export: %s every %s\n", *exportRWURL, *exportRWInterval)
+	}
+	var rawTee capture.RawTee
+	if tee.spans != nil || tee.otlp != nil {
+		rawTee = tee
+	}
 
 	captureCfg := capture.Config{
 		OTLPGRPCAddr:     *otlpGRPC,
