@@ -19,3 +19,13 @@ metadata:
   labels:
     app.kubernetes.io/name: ollie
     app.kubernetes.io/part-of: ollie
+    # The agent pod needs hostPID + hostPath mounts + added
+    # capabilities for eBPF capture; on clusters that enforce Pod
+    # Security admission the namespace must opt out of the default
+    # baseline/restricted level or the DaemonSet is rejected outright
+    # (#155). This is the K8s-sanctioned mechanism for privileged
+    # system agents; the pod's own securityContext remains as tight
+    # as the manifest declares.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

@@ -40,12 +40,25 @@ spec:
     matchLabels:
       app.kubernetes.io/name: ollie
       app.kubernetes.io/component: agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Bounded rollout: at most 10% of nodes lose capture at once
+      # during an agent upgrade (#155).
+      maxUnavailable: 10%
   template:
     metadata:
       labels:
         app.kubernetes.io/name: ollie
         app.kubernetes.io/component: agent
     spec:
+      # Observability node agents must run everywhere and survive
+      # node pressure: schedule onto tainted nodes (control plane,
+      # dedicated pools) and claim the standard node-critical
+      # priority (#155).
+      tolerations:
+        - operator: Exists
+      priorityClassName: system-node-critical
       # ServiceAccount granted list/watch on pods/services/nodes/
       # replicasets so OBI's K8s metadata informer can attach
       # k8s.* attrs to captured events (per ADR-0021).
@@ -126,8 +139,14 @@ spec:
                 - CHECKPOINT_RESTORE # open target ELF files (uprobe attach)
                 - DAC_READ_SEARCH    # bypass DAC on /proc/<pid>/exe
                                      # and mounted container roots
-                - SYS_ADMIN          # Go context propagation + some
-                                     # BPF map ops on older kernels
+                - SYS_ADMIN          # empirically REQUIRED by OBI
+                                     # v0.9.0's L7 uprobe path: a #155
+                                     # drop attempt left L4 flowing but
+                                     # killed HTTP capture (go.Tracer
+                                     # logs "Kernel in lockdown mode or
+                                     # missing CAP_SYS_ADMIN"; verified
+                                     # by tests/e2e). Re-attempt the
+                                     # drop on each OBI bump (#152).
               drop:
                 - ALL
             readOnlyRootFilesystem: true
@@ -188,6 +207,22 @@ spec:
             - name: scrape
               containerPort: 9090
               protocol: TCP
+          # tcpSocket rather than httpGet (#155): /metrics requires a
+          # bearer token in-cluster (--scrape-auth, #145) and kubelet
+          # probes don't carry one. A TCP connect verifies the scrape
+          # listener is up without weakening auth; a wedged listener
+          # was previously invisible.
+          readinessProbe:
+            tcpSocket:
+              port: scrape
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: scrape
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
           resources:
             requests:
               cpu: 50m
@@ -200,6 +235,12 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65532
+            # The agent is an ordinary unprivileged process; the
+            # runtime's default seccomp filter costs nothing here
+            # (#155). The obi container stays unconfined — its BPF
+            # syscall surface is exactly what default profiles gate.
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop:
                 - ALL
