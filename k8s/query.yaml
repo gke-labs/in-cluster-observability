@@ -55,9 +55,15 @@ spec:
             - --http-addr=0.0.0.0:9095
             - --agent-service=ollie-agent.ollie-system.svc.cluster.local
             - --agent-port=9091
+            # custom.metrics.k8s.io backend for the aggregation
+            # layer (#96); self-signed TLS per ADR-0025 §7.
+            - --tls-addr=0.0.0.0:6443
+            - --custom-metrics-config=/etc/ollie/custom-metrics/config.yaml
           ports:
             - name: http
               containerPort: 9095
+            - name: https
+              containerPort: 6443
           livenessProbe:
             httpGet: { path: /healthz/live, port: http }
             initialDelaySeconds: 10
@@ -83,6 +89,15 @@ spec:
             capabilities:
               drop:
                 - ALL
+          volumeMounts:
+            - name: custom-metrics-config
+              mountPath: /etc/ollie/custom-metrics
+              readOnly: true
+      volumes:
+        - name: custom-metrics-config
+          configMap:
+            name: ollie-custom-metrics
+            optional: true
 ---
 apiVersion: v1
 kind: Service
@@ -100,6 +115,10 @@ spec:
     - name: http
       port: 9095
       targetPort: http
+      protocol: TCP
+    - name: https
+      port: 6443
+      targetPort: https
       protocol: TCP
 ---
 apiVersion: policy/v1

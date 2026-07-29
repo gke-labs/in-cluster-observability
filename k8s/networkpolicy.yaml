@@ -114,6 +114,13 @@ spec:
     - ports:
         - port: 9095
           protocol: TCP
+    # kube-apiserver -> custom-metrics backend (#96). The aggregator
+    # originates from the control-plane host network, so no pod/
+    # namespace selector can pin it; the port stays open at the
+    # network layer.
+    - ports:
+        - port: 6443
+          protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

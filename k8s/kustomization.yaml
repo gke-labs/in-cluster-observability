@@ -25,4 +25,5 @@ resources:
   - daemonset.yaml
   - agent-service.yaml
   - query.yaml
+  - custommetrics.yaml
   - networkpolicy.yaml

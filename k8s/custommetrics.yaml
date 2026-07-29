@@ -1,0 +1,100 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# custom.metrics.k8s.io aggregation (v0.5, #96): the HPA reads our
+# metrics through standard K8s API aggregation, backed by ollie-query.
+#
+# TLS posture per ADR-0025 §7: ollie-query serves a startup-generated
+# self-signed certificate and the APIService sets
+# insecureSkipTLSVerify. The v0.6 TLS milestone replaces this with a
+# real CA bundle (cert-manager or CA injection); tracked there
+# deliberately rather than half-done here.
+
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.custom.metrics.k8s.io
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+spec:
+  group: custom.metrics.k8s.io
+  version: v1beta1
+  groupPriorityMinimum: 100
+  versionPriority: 100
+  insecureSkipTLSVerify: true
+  service:
+    name: ollie-query
+    namespace: ollie-system
+    port: 6443
+---
+# The HPA controller's ServiceAccount must be allowed (by kube-
+# apiserver RBAC, evaluated before the aggregator proxies) to read
+# custom-metrics resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ollie-custom-metrics-server-resources
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+rules:
+  - apiGroups: ["custom.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ollie-hpa-controller-custom-metrics
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ollie-custom-metrics-server-resources
+subjects:
+  - kind: ServiceAccount
+    name: horizontal-pod-autoscaler
+    namespace: kube-system
+---
+# Operator-editable metric-path -> PromQL template mapping
+# (storage-and-query.md §7). ollie-query loads this file at startup;
+# missing keys fall back to built-in defaults, empty values remove a
+# default. Edit + `kubectl rollout restart deploy/ollie-query`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollie-custom-metrics
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: query
+data:
+  config.yaml: |
+    # metrics: map a metric name (the last URL segment the HPA
+    # requests) to a PromQL text/template. {{.Selector}} expands to
+    #   k8s_namespace_name="<ns>",<resource label>="<name>"
+    # resources: map a resource plural to the series label that
+    # identifies one object of that kind.
+    #
+    # Built-in defaults cover: qps, latency_p50, latency_p99,
+    # bytes_in_per_sec, bytes_out_per_sec over pods, deployments,
+    # statefulsets, daemonsets, services. Example override:
+    #
+    # metrics:
+    #   error_rate: 'sum(rate(http_server_request_duration_count{ {{.Selector}} ,http_response_status_code=~"5.."}[1m]))'
+    metrics: {}
+    resources: {}
