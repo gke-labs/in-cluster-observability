@@ -369,8 +369,9 @@ func TestIobsctl(t *testing.T) {
 	// within seconds of boot.
 	h.PollKubectl(3*time.Minute, "iobsctl metrics returns sum(ollie_agent_up)",
 		func() (string, error) {
-			out, err := exec.Command(bin, "metrics", "sum(ollie_agent_up)",
-				"--context", kubectx, "--timeout", "30s").CombinedOutput()
+			out, err := exec.Command(bin, "metrics",
+				"--context", kubectx, "--timeout", "30s",
+				"sum(ollie_agent_up)").CombinedOutput()
 			return string(out), err
 		},
 		func(out string) bool {
