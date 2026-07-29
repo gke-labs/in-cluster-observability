@@ -712,7 +712,7 @@ Two sequencing rules ride with this ADR:
 
 ## ADR-0024: Extensibility via wire protocols, not a Go library (resolves #157)
 
-**Status:** Proposed, 2026-07-29 — merging the PR that adds this ADR constitutes acceptance. Supersedes the library clause of requirements §2.4, [ADR-0004](#adr-0004-library--controller-posture-public-api-in-pkg)'s "importable Go library" posture, and [ADR-0011](#adr-0011-sink-interface-shape)'s in-process sink interfaces.
+**Status:** Accepted, 2026-07-29. Supersedes the library clause of requirements §2.4, [ADR-0004](#adr-0004-library--controller-posture-public-api-in-pkg)'s "importable Go library" posture, and [ADR-0011](#adr-0011-sink-interface-shape)'s in-process sink interfaces.
 
 **Context.** Requirements §2.4 made "third parties import the library and register their own sinks" load-bearing, as the differentiator versus Pixie. That posture was designed before [ADR-0018](#adr-0018-obi-as-sibling-container-not-embedded-library), when the plan was an in-process Go event pipeline embedders could hook. Three milestones later, the premise no longer describes the system:
 
@@ -753,7 +753,7 @@ Two sequencing rules ride with this ADR:
 
 ## Open and superseded ADRs
 
-- **ADR-0004 / ADR-0011** — superseded by ADR-0024 (pending acceptance): extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.
+- **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.
 - **ADR-0017.4** — superseded by ADR-0021. OBI's native K8s attribute attachment is now ON; the agent attaches none.
 - **ADR-0020** — sub-decisions superseded in part by ADR-0021. See ADR-0021 consequences for the per-clause status.
 - **ADR-0009** — narrowed by ADR-0022.5. Identity broadcasting cut from v0.4 because OBI's informer covers the source-side case natively (ADR-0021); the ADR-0009 mechanism may reopen in v0.5+ for the off-cluster / L7-peer cases that OBI doesn't cover.

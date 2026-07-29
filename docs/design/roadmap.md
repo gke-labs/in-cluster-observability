@@ -119,7 +119,7 @@ The principle: ship a focused v1 that hits requirements §1–§7 cleanly, then 
 
 ## 9. Plugin model for non-Go sinks / filters
 
-**Retired by [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157) (2026-07-29, pending acceptance).** Extensibility is wire-protocol-based (OTLP push, streaming subscribe, scrape/remote-write); there is no in-process extension point left for a plugin model to serve. Non-Go consumers were the strongest argument for WASM — they are served natively by the wire surface.
+**Retired by [ADR-0024](decisions.md#adr-0024-extensibility-via-wire-protocols-not-a-go-library-resolves-157) (2026-07-29).** Extensibility is wire-protocol-based (OTLP push, streaming subscribe, scrape/remote-write); there is no in-process extension point left for a plugin model to serve. Non-Go consumers were the strongest argument for WASM — they are served natively by the wire surface.
 
 ## 10. eBPF-side cardinality enforcement
 
