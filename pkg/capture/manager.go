@@ -80,8 +80,10 @@ type Manager interface {
 // Stability: Experimental
 type Config struct {
 	// KubeletAddr is the URL the agent uses to query the node-local
-	// Kubelet for the PID-to-Pod cache bootstrap (v0.3 / pkg/topology).
-	// Defaults to "https://127.0.0.1:10250" when empty.
+	// Kubelet for the PID-to-Pod cache bootstrap. Unused since
+	// ADR-0021 (OBI's informer owns K8s attribution); retained for
+	// config compatibility. Defaults to "https://127.0.0.1:10250"
+	// when empty.
 	KubeletAddr string
 	// ProcPath is the mount point of host /proc inside the agent
 	// container. Defaults to "/proc" when empty.

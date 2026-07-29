@@ -21,12 +21,12 @@ package schema
 
 // MetricPrefix is the namespace prefix every metric name carries.
 //
-// Stability: Stable
+// Stability: Experimental
 const MetricPrefix = "ollie"
 
 // Source-side label keys following OTel K8s semantic conventions.
 //
-// Stability: Stable
+// Stability: Experimental
 const (
 	LabelK8sPodName         = "k8s.pod.name"
 	LabelK8sPodUID          = "k8s.pod.uid"
@@ -90,7 +90,7 @@ func ForwardableLabel(key string) bool {
 
 // Peer-side label keys mirror the source-side namespace.
 //
-// Stability: Stable
+// Stability: Experimental
 const (
 	LabelPeerK8sPodName        = "peer.k8s.pod.name"
 	LabelPeerK8sNamespaceName  = "peer.k8s.namespace.name"
