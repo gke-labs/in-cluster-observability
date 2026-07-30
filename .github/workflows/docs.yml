@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Docs site: Astro Starlight under docs/site/ (go-steer convention,
+# mirrors go-steer/core-agent — see #182). npm-only toolchain, fully
+# pinned by package-lock.json; no build-time dependency resolution of
+# any kind (the Hugo-era `hugo mod get -u` upgraded the theme past the
+# repo's pin and broke the merge gate the day Docsy v0.16 shipped).
+#
+# PRs run build + link/redirect verification only; push-to-main (and
+# manual dispatch) additionally deploy to GitHub Pages.
+
 name: Docs
 
 on:
@@ -19,15 +28,17 @@ on:
     branches: [main]
     paths:
       - 'docs/site/**'
+      - 'scripts/verify-internal-links.py'
+      - 'scripts/verify-redirects.py'
+      - 'scripts/generate-redirects.py'
       - '.github/workflows/docs.yml'
-  # PRs run the build job only (no deploy) so broken Hugo / SCSS /
-  # Docsy module fetches get caught at the merge gate instead of
-  # in the post-merge production build. The deploy job's `if:`
-  # guard below scopes the actual Pages upload to push events.
   pull_request:
     branches: [main]
     paths:
       - 'docs/site/**'
+      - 'scripts/verify-internal-links.py'
+      - 'scripts/verify-redirects.py'
+      - 'scripts/generate-redirects.py'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -37,15 +48,12 @@ concurrency:
   cancel-in-progress: true
 
 # Least privilege at the workflow level; the Pages grants
-# (`pages: write` + `id-token: write`) are scoped to the deploy job
-# below — the build job only checks out and uploads an artifact.
+# (`pages: write` + `id-token: write`) are scoped to the deploy job.
 permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.26'
-  HUGO_VERSION: '0.158.0'
-  NODE_VERSION: '20'
+  NODE_VERSION: '22'
 
 jobs:
   build:
@@ -53,66 +61,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0   # needed for enableGitInfo (lastmod from git history)
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          check-latest: true
-
-      # Docsy compiles Bootstrap SCSS through Hugo's bundled pipeline
-      # and pipes the result through PostCSS for autoprefixing. The
-      # SCSS itself ships in github.com/google/docsy as a Hugo module
-      # (no separate `dependencies` module since v0.15.0). PostCSS
-      # and the autoprefixer plugin are Node-side and have to be on
-      # PATH at hugo-build time.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # ratchet:actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: docs/site/package-lock.json
 
-      - name: Install PostCSS + autoprefixer (Docsy CSS pipeline)
+      - name: Install (locked)
         working-directory: docs/site
-        run: npm install
-
-      - name: Install Hugo
-        run: |
-          curl -sSLf -o /tmp/hugo.tar.gz \
-            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
-          tar -C /tmp -xzf /tmp/hugo.tar.gz hugo
-          sudo install /tmp/hugo /usr/local/bin/hugo
-          hugo version
-
-      - id: pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # ratchet:actions/configure-pages@v5
+        run: npm ci
 
       - name: Build
         working-directory: docs/site
-        # No `hugo mod get` here, deliberately: hugo resolves modules
-        # from go.mod/go.sum on its own at build time, and any form of
-        # `mod get` shells out to `go get`, which re-resolves to LATEST
-        # and discards the repo's pin. That broke the first build after
-        # Docsy v0.16.0 shipped upstream (blocks/cover shortcode moved)
-        # even though go.mod pins v0.15.0. Theme bumps are deliberate
-        # PRs against go.mod now. BASE_URL goes through env, not inline
-        # template expansion in the script (zizmor template-injection).
-        run: |
-          hugo --minify --baseURL "${BASE_URL}/"
-        env:
-          HUGO_ENVIRONMENT: production
-          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: npm run build
 
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # ratchet:actions/upload-pages-artifact@v3
+      # The redirect stubs for legacy Hugo URLs are committed under
+      # docs/site/public/ (regenerate with scripts/generate-redirects.py);
+      # verify they point at live pages, then verify every internal
+      # link in the built site resolves.
+      - name: Verify redirect stubs
+        run: python3 scripts/verify-redirects.py
+
+      - name: Verify internal links
+        run: python3 scripts/verify-internal-links.py
+
+      - id: pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # ratchet:actions/configure-pages@v5
+
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # ratchet:actions/upload-pages-artifact@v3
         with:
-          path: docs/site/public
+          path: docs/site/dist
 
   deploy:
     name: deploy
     needs: build
     # PR runs validate the build but must NOT publish to Pages —
     # only push-to-main (and manual workflow_dispatch from main)
-    # promote to the live site. Without this guard, every PR
-    # build would overwrite the published site.
+    # promote to the live site.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # The only job that touches Pages: OIDC token + deployment write.
