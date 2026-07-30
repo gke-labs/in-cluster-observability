@@ -1,0 +1,49 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scale the echo Deployment on its OBI-captured request rate, served
+# through Ollie's custom.metrics.k8s.io API. `qps` maps to
+#   sum(rate(http_server_request_duration_count{...}[1m]))
+# (built-in template; override via the ollie-custom-metrics ConfigMap
+# in k8s/custommetrics.yaml).
+#
+# v0.5 serves Object metrics on concrete names, so the metric describes
+# the Deployment as a whole and the target is AverageValue: desired
+# replicas = total qps / averageValue. 500m (0.5 rps per replica)
+# against the demo client's ~5 rps forces a quick scale to maxReplicas;
+# real workloads want a value near one replica's actual capacity.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: echo
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: echo
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Object
+      object:
+        describedObject:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: echo
+        metric:
+          name: qps
+        target:
+          type: AverageValue
+          averageValue: 500m
