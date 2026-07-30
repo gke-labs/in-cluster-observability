@@ -1,0 +1,123 @@
+---
+title: Ollie
+description: Transparent eBPF network observability for Kubernetes workloads — zero instrumentation, full K8s identity, in-cluster PromQL, and HPA autoscaling on captured traffic.
+template: doc
+tableOfContents: false
+hero:
+  title: Ollie
+  tagline: Transparent, eBPF-based network observability for Kubernetes. Your apps don't change — L4 + L7 metrics and spans with full Kubernetes identity, in-cluster PromQL, and HPA autoscaling on captured traffic.
+  actions:
+    - text: Get started
+      link: /in-cluster-observability/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: Autoscale on traffic
+      link: /in-cluster-observability/use-cases/hpa-autoscaling/
+      icon: right-arrow
+      variant: secondary
+    - text: GitHub
+      link: https://github.com/gke-labs/in-cluster-observability
+      icon: github
+      variant: minimal
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+**Ollie** is an eBPF-based agent that captures network traffic on every
+Kubernetes node and turns it into metrics and spans attributed by K8s
+identity (pod, namespace, deployment, service) — without touching the
+workloads. Built on
+[OpenTelemetry eBPF Instrumentation (OBI)](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation),
+it adds declarative CRD-driven onboarding, a per-node metric store with
+cluster-wide PromQL, a `custom.metrics.k8s.io` API for the HPA, OTLP and
+remote-write egress, and CEL-filtered live span streaming.
+
+**Status: v0.5 shipped, hardened by v0.5.1.** An HPA scales a real
+workload on captured metrics end to end — machine-verified on every PR.
+[What works today](/what-works-today/) is the honest inventory, tiered
+by how strongly each claim is verified.
+
+(The name plays on *o11y*, the standard observability abbreviation.)
+
+## What you get
+
+<CardGrid>
+  <LinkCard
+    title="Zero instrumentation"
+    description="eBPF probes in the kernel — no SDK, no sidecar, no code changes. L4 TCP flows and L7 HTTP metrics from any process on the configured ports."
+    href="/in-cluster-observability/architecture/"
+  />
+  <LinkCard
+    title="K8s identity, free"
+    description="k8s.pod.name, namespace, deployment, node — attached to every datapoint by OBI's informer. L4 flows carry both source and destination identity."
+    href="/in-cluster-observability/what-works-today/"
+  />
+  <LinkCard
+    title="In-cluster PromQL"
+    description="Each node stores its own metrics in an embedded tsdb; the query server fans reads out to every agent and serves standard /api/v1/query."
+    href="/in-cluster-observability/architecture/"
+  />
+  <LinkCard
+    title="HPA on captured traffic"
+    description="custom.metrics.k8s.io backed by the query server — scale a Deployment on its request rate without exporting a single metric."
+    href="/in-cluster-observability/use-cases/hpa-autoscaling/"
+  />
+</CardGrid>
+
+## Should I try this today?
+
+Use this to self-select before you spend ten minutes on the Kind
+walkthrough.
+
+### Yes — try it today if …
+
+- You have **HTTP/1.1 workloads** and want per-pod L4 + L7 metrics with
+  K8s identity, scrapable by any Prometheus, in one `kubectl apply -k`.
+- You want **HPA scaling on captured network metrics** — the
+  [worked example](/use-cases/hpa-autoscaling/) goes from install to
+  scale-up with nothing instrumented.
+- You want **cluster-local PromQL** over captured data without piping it
+  to an external TSDB first.
+- You want **live span streaming** filtered by CEL at the source
+  (`iobsctl spans --filter '...'`), or OTLP / remote-write egress to
+  your existing pipeline.
+- You're **evaluating the architecture** — OBI as a sibling container,
+  per-node stores with storage-layer fan-out, wire-protocol
+  extensibility.
+
+### Come back for v0.6 if …
+
+- Your workloads use **HTTP/2, gRPC, or TLS** — coverage today is
+  L4 TCP + HTTP/1.1; protocol hardening is the next milestone.
+- You need **TLS on every internal hop** — client auth on the
+  custom-metrics port is enforced today; serving-cert CA bundles and
+  agent↔query TLS land in v0.6.
+- You're worried about **cardinality blowups** from high-variability
+  URL paths — path templating and sampling arrive in v0.6.
+
+### Come back for v1.0 if …
+
+- You want a **Helm chart, operator runbook, upgrade guide, or
+  multi-arch images**.
+- You're **running this in production** — pre-1.0 milestones have no
+  upgrade path and no SLOs.
+
+The [roadmap](/roadmap/) tracks scope per milestone; watching the
+[repo](https://github.com/gke-labs/in-cluster-observability) is the
+easiest way to know when to revisit.
+
+## Try it
+
+```sh
+docker build -t ollie:dev            -f images/ollie/Dockerfile .
+docker build -t ollie-controller:dev -f images/ollie-controller/Dockerfile .
+docker build -t ollie-query:dev      -f images/ollie-query/Dockerfile .
+docker pull otel/ebpf-instrument:v0.10.0
+kind create cluster --name ollie-demo
+kind load docker-image --name ollie-demo ollie:dev ollie-controller:dev ollie-query:dev otel/ebpf-instrument:v0.10.0
+kubectl apply -k k8s/
+```
+
+Then follow [Getting started](/getting-started/) for the image-pinning
+patch, a demo workload, and the scrape/query recipes — or jump straight
+to [autoscaling on captured traffic](/use-cases/hpa-autoscaling/).

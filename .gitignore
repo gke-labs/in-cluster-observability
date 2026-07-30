@@ -6,3 +6,6 @@ opentelemetry/opentelemetry-node-agent
 opentelemetry/opentelemetry-query-server
 opentelemetry/test-app
 opentelemetry/.build/
+docs/site/node_modules/
+docs/site/dist/
+docs/site/.astro/
