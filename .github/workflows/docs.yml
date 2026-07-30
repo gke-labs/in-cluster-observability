@@ -53,11 +53,11 @@ jobs:
     name: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
         with:
           fetch-depth: 0   # needed for enableGitInfo (lastmod from git history)
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: true
@@ -68,7 +68,7 @@ jobs:
       # (no separate `dependencies` module since v0.15.0). PostCSS
       # and the autoprefixer plugin are Node-side and have to be on
       # PATH at hugo-build time.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # ratchet:actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -85,22 +85,25 @@ jobs:
           hugo version
 
       - id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # ratchet:actions/configure-pages@v5
 
       - name: Build
         working-directory: docs/site
-        # `hugo mod get` (no -u) fetches exactly the versions pinned in
-        # go.mod/go.sum. The previous `-u` upgraded Docsy at build time,
-        # which silently discarded the repo's pin and broke the first
-        # build after Docsy v0.16.0 shipped (blocks/cover shortcode
-        # moved). Theme bumps are deliberate PRs against go.mod now.
+        # No `hugo mod get` here, deliberately: hugo resolves modules
+        # from go.mod/go.sum on its own at build time, and any form of
+        # `mod get` shells out to `go get`, which re-resolves to LATEST
+        # and discards the repo's pin. That broke the first build after
+        # Docsy v0.16.0 shipped upstream (blocks/cover shortcode moved)
+        # even though go.mod pins v0.15.0. Theme bumps are deliberate
+        # PRs against go.mod now. BASE_URL goes through env, not inline
+        # template expansion in the script (zizmor template-injection).
         run: |
-          hugo mod get
-          hugo --minify --baseURL "${{ steps.pages.outputs.base_url }}/"
+          hugo --minify --baseURL "${BASE_URL}/"
         env:
           HUGO_ENVIRONMENT: production
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # ratchet:actions/upload-pages-artifact@v3
         with:
           path: docs/site/public
 
@@ -118,4 +121,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # ratchet:actions/deploy-pages@v4
