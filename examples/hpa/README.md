@@ -13,7 +13,7 @@ gates on every PR, extracted for standalone use.
 ## Prerequisites
 
 1. **Ollie installed** — follow
-   [Getting started](https://gke-labs.github.io/in-cluster-observability/docs/getting-started/)
+   [Getting started](https://gke-labs.github.io/in-cluster-observability/getting-started/)
    (build/load the three images, `kubectl apply -k k8s/`). All of the
    components this example needs (query server, custom-metrics
    APIService, RBAC) are part of that one install.

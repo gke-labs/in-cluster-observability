@@ -24,6 +24,7 @@ Milestone status:
 What's in the repo:
 
 - `docs/` — design (`docs/design/`), agreed requirements (`docs/requirements.md`), early rough sketch (`docs/rough_design.md`)
+- `docs/site/` — the published docs site (gke-labs.github.io/in-cluster-observability): **Astro Starlight**, go-steer convention mirroring `go-steer/core-agent` (#182). npm-only toolchain pinned by `package-lock.json` — build with `cd docs/site && npm ci && npm run build`; never introduce build-time dependency resolution (the Hugo-era `hugo mod get -u` broke the merge gate when the theme released upstream). Deploy is push-to-main via `.github/workflows/docs.yml` (PRs build + verify only). `scripts/verify-internal-links.py` and `scripts/verify-redirects.py` gate every build; legacy Hugo URLs are covered by committed stubs under `docs/site/public/docs/` (regenerate with `scripts/generate-redirects.py`). Content links in markdown are written base-independent (`/getting-started/`) — `remark-prepend-base` adds the deploy base; frontmatter hero links and MDX component hrefs need the base spelled out (`/in-cluster-observability/...`).
 - `AGENTS.md` — this file
 - `GEMINI.md` — stub pointing here
 - `.ap/` — autoproject config (`ap.yaml`, `headers.yaml`)
