@@ -36,12 +36,11 @@ concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
 
-# GitHub Pages deployment needs `pages: write` + `id-token: write`.
-# `contents: read` is enough to checkout.
+# Least privilege at the workflow level; the Pages grants
+# (`pages: write` + `id-token: write`) are scoped to the deploy job
+# below — the build job only checks out and uploads an artifact.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 env:
   GO_VERSION: '1.26'
@@ -116,6 +115,10 @@ jobs:
     # build would overwrite the published site.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # The only job that touches Pages: OIDC token + deployment write.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
