@@ -89,8 +89,13 @@ jobs:
 
       - name: Build
         working-directory: docs/site
+        # `hugo mod get` (no -u) fetches exactly the versions pinned in
+        # go.mod/go.sum. The previous `-u` upgraded Docsy at build time,
+        # which silently discarded the repo's pin and broke the first
+        # build after Docsy v0.16.0 shipped (blocks/cover shortcode
+        # moved). Theme bumps are deliberate PRs against go.mod now.
         run: |
-          hugo mod get -u
+          hugo mod get
           hugo --minify --baseURL "${{ steps.pages.outputs.base_url }}/"
         env:
           HUGO_ENVIRONMENT: production
