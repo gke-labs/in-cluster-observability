@@ -23,21 +23,30 @@ kind create cluster --name ollie-v03
 
 The default single-node cluster is enough. Multi-node works too — the agent is a DaemonSet, you'll get one agent per node.
 
-## 2. Build and load both images
+## 2. Build and load the images
+
+Since v0.5 the install is three Ollie workloads — the agent DaemonSet,
+the controller, and the query server (which also backs the HPA
+custom-metrics API) — so three images build from this repo, plus the
+pinned OBI image:
 
 ```sh
-# Build the agent image.
-docker build -t ollie:v0.3 -f images/ollie/Dockerfile .
+# Build the three Ollie images.
+docker build -t ollie:dev            -f images/ollie/Dockerfile .
+docker build -t ollie-controller:dev -f images/ollie-controller/Dockerfile .
+docker build -t ollie-query:dev      -f images/ollie-query/Dockerfile .
 
-# Pull and load OBI v0.9 (the eBPF data plane).
+# Pull OBI (the eBPF data plane).
 docker pull otel/ebpf-instrument:v0.10.0
 
-# Load both into the Kind cluster's node-local image store.
-kind load docker-image --name ollie-v03 ollie:v0.3
+# Load all four into the Kind cluster's node-local image store.
+kind load docker-image --name ollie-v03 ollie:dev
+kind load docker-image --name ollie-v03 ollie-controller:dev
+kind load docker-image --name ollie-v03 ollie-query:dev
 kind load docker-image --name ollie-v03 otel/ebpf-instrument:v0.10.0
 ```
 
-On a real cluster, push to your registry instead (`docker push <registry>/ollie:v0.3`) and skip the `kind load` step.
+On a real cluster, push to your registry instead (`docker push <registry>/ollie:dev`, etc.) and skip the `kind load` steps.
 
 ## 3. Apply the manifest
 
@@ -52,20 +61,35 @@ This installs:
 - DaemonSet `ollie-agent` with two containers:
   - `obi` — the upstream `otel/ebpf-instrument:v0.10.0` image, privileged with the eBPF capability set, doing the actual eBPF capture.
   - `agent` — our image, unprivileged, exposing the Prometheus scrape on `:9090`.
+- Deployment `ollie-controller` — the control plane: reconciles the `TrafficMonitor` / `ClusterTrafficPolicy` CRDs (also installed) and pushes capture config to agents.
+- Deployment `ollie-query` — cluster-wide PromQL over every agent's store (`:9095`), plus the `custom.metrics.k8s.io` APIService that lets an HPA scale on captured metrics.
+- NetworkPolicies (default-deny ingress with minimum allows) and the custom-metrics RBAC.
 
 ## 4. Pin images on Kind
 
-On Kind, locally loaded images won't be re-pulled, so the DaemonSet needs `imagePullPolicy: IfNotPresent`. The manifest intentionally leaves the policy unset (a `ap deploy` convention for production), so patch it explicitly on Kind:
+On Kind, locally loaded images won't be re-pulled, so every workload needs `imagePullPolicy: IfNotPresent`. The manifests intentionally leave the policy unset (an `ap deploy` convention for production), so patch all three explicitly on Kind:
 
 ```sh
 kubectl patch -n ollie-system daemonset/ollie-agent --type=strategic -p='{
   "spec":{"template":{"spec":{"containers":[
     {"name":"obi",   "image":"otel/ebpf-instrument:v0.10.0", "imagePullPolicy":"IfNotPresent"},
-    {"name":"agent", "image":"ollie:v0.3",                   "imagePullPolicy":"IfNotPresent"}
+    {"name":"agent", "image":"ollie:dev",                    "imagePullPolicy":"IfNotPresent"}
+  ]}}}
+}'
+kubectl patch -n ollie-system deployment/ollie-controller --type=strategic -p='{
+  "spec":{"template":{"spec":{"containers":[
+    {"name":"controller", "image":"ollie-controller:dev", "imagePullPolicy":"IfNotPresent"}
+  ]}}}
+}'
+kubectl patch -n ollie-system deployment/ollie-query --type=strategic -p='{
+  "spec":{"template":{"spec":{"containers":[
+    {"name":"query", "image":"ollie-query:dev", "imagePullPolicy":"IfNotPresent"}
   ]}}}
 }'
 
 kubectl rollout status -n ollie-system daemonset/ollie-agent --timeout=120s
+kubectl rollout status -n ollie-system deployment/ollie-controller --timeout=120s
+kubectl rollout status -n ollie-system deployment/ollie-query --timeout=120s
 ```
 
 Skip this step on a real cluster — the default `Always` (or `IfNotPresent` when not using `:latest`) does the right thing once your images are in a real registry.
@@ -231,6 +255,11 @@ The `scrape` port is named in the DaemonSet manifest, so this works without manu
 **The scrape returns a `target_info` error.** Means you're on a v0.3 build before commit `fbbf7e7` (which disabled the auto-generated `target_info` in the Prometheus exporter). Rebuild the image and reload.
 
 **No metrics at all, even `ollie_agent_up`.** The agent failed to start the scrape listener. Check `kubectl logs -c agent` for a `scrape listen 0.0.0.0:9090: ...` error and ensure no other process is bound to `:9090` in the pod.
+
+## Where next
+
+- **Autoscale on captured traffic** — [`examples/hpa/`](https://github.com/gke-labs/in-cluster-observability/tree/main/examples/hpa) walks an `autoscaling/v2` HPA scaling an uninstrumented workload on its OBI-captured request rate, through the `custom.metrics.k8s.io` API the install above already registered.
+- **Cluster-wide PromQL** — port-forward `deploy/ollie-query` `:9095` and hit `/api/v1/query`; the query server fans out to every agent's store and merges.
 
 ## Tearing down
 
