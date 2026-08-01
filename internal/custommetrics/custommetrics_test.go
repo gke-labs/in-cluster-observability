@@ -20,6 +20,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,6 +151,83 @@ func TestErrors(t *testing.T) {
 		if !strings.Contains(string(body), `"kind":"Status"`) {
 			t.Errorf("%s: error body not a metav1.Status: %s", path, body)
 		}
+	}
+}
+
+// The HPA's spec.metrics[].object.metric.selector arrives as the
+// metricLabelSelector query parameter and must scope the PromQL —
+// ignoring it returned the unfiltered aggregate (#185).
+func TestMetricLabelSelector(t *testing.T) {
+	eval := &fakeEval{vec: promql.Vector{{F: 1}}}
+	h := newHandler(t, eval, "")
+
+	base := basePath + "/namespaces/shop/deployments/backend/qps"
+	for _, tc := range []struct {
+		sel  string
+		want []string
+	}{
+		{"tier=frontend", []string{`tier="frontend"`}},
+		{"tier!=canary", []string{`tier!="canary"`}},
+		{"tier in (a,b)", []string{`tier=~"a|b"`}},
+		{"tier notin (a.b)", []string{`tier!~"a\\.b"`}},                  // regex metachars quoted (PromQL-escaped)
+		{"k8s.container.name=api", []string{`k8s_container_name="api"`}}, // dotted alias
+		{"tier", []string{`tier!=""`}},
+		{"!tier", []string{`tier=""`}},
+	} {
+		code, body := do(t, h, base+"?metricLabelSelector="+url.QueryEscape(tc.sel))
+		if code != http.StatusOK {
+			t.Fatalf("%s: code = %d body=%s", tc.sel, code, body)
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(eval.lastExpr, want) {
+				t.Errorf("%s: rendered expr %s missing %s", tc.sel, eval.lastExpr, want)
+			}
+		}
+	}
+
+	// Unparseable selectors are rejected loudly, never silently
+	// unfiltered.
+	code, body := do(t, h, base+"?metricLabelSelector="+url.QueryEscape("a=b,==="))
+	if code != http.StatusBadRequest {
+		t.Fatalf("bad selector: code = %d (want 400) body=%s", code, body)
+	}
+}
+
+// The namespace pseudo-resource has its own (shorter) URL shape and
+// was advertised in discovery with no route behind it (#193).
+func TestNamespaceMetric(t *testing.T) {
+	eval := &fakeEval{vec: promql.Vector{{F: 2}}}
+	h := newHandler(t, eval, "")
+	code, body := do(t, h, basePath+"/namespaces/shop/metrics/qps")
+	if code != http.StatusOK {
+		t.Fatalf("code = %d body=%s", code, body)
+	}
+	var mvl MetricValueList
+	if err := json.Unmarshal(body, &mvl); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	it := mvl.Items[0]
+	if it.DescribedObject.Kind != "Namespace" || it.DescribedObject.Name != "shop" || it.DescribedObject.Namespace != "" {
+		t.Fatalf("describedObject = %+v", it.DescribedObject)
+	}
+	if !strings.Contains(eval.lastExpr, `k8s_namespace_name="shop"`) {
+		t.Fatalf("expr = %s", eval.lastExpr)
+	}
+}
+
+// services is deliberately not served by default (#193): OBI's
+// service_name is OTel attribution, not the K8s Service object.
+func TestServicesNotServedByDefault(t *testing.T) {
+	h := newHandler(t, &fakeEval{vec: promql.Vector{{F: 1}}}, "")
+	code, _ := do(t, h, basePath+"/namespaces/ns/services/svc/qps")
+	if code != http.StatusNotFound {
+		t.Fatalf("services: code = %d, want 404", code)
+	}
+	// The ConfigMap overlay opts back in.
+	h2 := newHandler(t, &fakeEval{vec: promql.Vector{{F: 1}}}, "resources:\n  services: service_name\n")
+	code, _ = do(t, h2, basePath+"/namespaces/ns/services/svc/qps")
+	if code != http.StatusOK {
+		t.Fatalf("services via overlay: code = %d, want 200", code)
 	}
 }
 

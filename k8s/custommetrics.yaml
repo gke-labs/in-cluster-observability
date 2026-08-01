@@ -122,7 +122,12 @@ data:
     #
     # Built-in defaults cover: qps, latency_p50, latency_p99,
     # bytes_in_per_sec, bytes_out_per_sec over pods, deployments,
-    # statefulsets, daemonsets, services. Example override:
+    # statefulsets, daemonsets. `services` is deliberately not a
+    # default (#193): OBI's service_name is OTel service attribution
+    # (usually the owner workload name), NOT the K8s Service object
+    # name. If your OBI service naming lines up, opt in here with
+    #   resources: {services: service_name}
+    # Example metric override:
     #
     # metrics:
     #   error_rate: 'sum(rate(http_server_request_duration_count{ {{.Selector}} ,http_response_status_code=~"5.."}[1m]))'

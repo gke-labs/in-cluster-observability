@@ -34,6 +34,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"text/template"
@@ -42,6 +43,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"sigs.k8s.io/yaml"
 
 	"github.com/prometheus/prometheus/promql"
@@ -88,12 +91,18 @@ var defaultMetrics = map[string]string{
 
 // defaultResources: plural → grouping label. `metrics` is the API's
 // namespace-metric pseudo-resource (GET .../namespaces/{ns}/metrics/{m}).
+//
+// `services` is deliberately ABSENT (#193): no stored label identifies
+// the Kubernetes Service object — OBI's service_name is OTel service
+// attribution (typically the workload owner name), so an HPA targeting
+// a Service would silently match the wrong series or none. Operators
+// whose OBI service naming does line up can opt back in via the
+// ConfigMap: `resources: {services: service_name}`.
 var defaultResources = map[string]string{
 	"pods":         "k8s_pod_name",
 	"deployments":  "k8s_deployment_name",
 	"statefulsets": "k8s_statefulset_name",
 	"daemonsets":   "k8s_daemonset_name",
-	"services":     "service_name",
 	"metrics":      "",
 }
 
@@ -192,7 +201,19 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux.HandleFunc("GET "+basePath, h.handleDiscovery)
 	mux.HandleFunc("GET "+basePath+"/{$}", h.handleDiscovery)
 	mux.HandleFunc("GET "+basePath+"/namespaces/{namespace}/{resource}/{name}/{metric}", h.handleMetric)
+	// Namespace-metric pseudo-resource: one path segment shorter than
+	// the object form, so it needs its own route — discovery had been
+	// advertising it with nothing mounted here (#193).
+	mux.HandleFunc("GET "+basePath+"/namespaces/{namespace}/metrics/{metric}", h.handleNamespaceMetric)
 	return mux
+}
+
+// handleNamespaceMetric serves GET .../namespaces/{ns}/metrics/{m} —
+// the metric evaluated over the whole namespace. The described object
+// is the Namespace itself (the plural=="metrics" branch below).
+func (h *Handler) handleNamespaceMetric(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("namespace")
+	h.serveMetric(w, r, ns, "metrics", ns, r.PathValue("metric"))
 }
 
 // handleDiscovery serves the APIResourceList the HPA's client (and
@@ -244,11 +265,12 @@ type MetricValueList struct {
 }
 
 func (h *Handler) handleMetric(w http.ResponseWriter, r *http.Request) {
-	ns := r.PathValue("namespace")
-	resourceArg := r.PathValue("resource")
-	name := r.PathValue("name")
-	metricName := r.PathValue("metric")
+	h.serveMetric(w, r,
+		r.PathValue("namespace"), r.PathValue("resource"),
+		r.PathValue("name"), r.PathValue("metric"))
+}
 
+func (h *Handler) serveMetric(w http.ResponseWriter, r *http.Request, ns, resourceArg, name, metricName string) {
 	// The HPA addresses grouped resources as "<plural>.<group>"
 	// (deployments.apps); kubectl examples use the bare plural.
 	plural := resourceArg
@@ -276,6 +298,19 @@ func (h *Handler) handleMetric(w http.ResponseWriter, r *http.Request) {
 	selector := fmt.Sprintf("k8s_namespace_name=%q", ns)
 	if label != "" {
 		selector += fmt.Sprintf(",%s=%q", label, name)
+	}
+	// The HPA forwards spec.metrics[].object.metric.selector as the
+	// metricLabelSelector query parameter. Ignoring it would silently
+	// return the UNFILTERED aggregate under the requested metric name
+	// (#185) — a wrong number with no error — so unparseable or
+	// inexpressible selectors are rejected loudly instead.
+	if raw := r.URL.Query().Get("metricLabelSelector"); raw != "" {
+		extra, err := promMatchersFromSelector(raw)
+		if err != nil {
+			writeStatusError(w, http.StatusBadRequest, fmt.Sprintf("metricLabelSelector %q: %v", raw, err))
+			return
+		}
+		selector += extra
 	}
 	var expr bytes.Buffer
 	if err := tmpl.Execute(&expr, struct{ Selector string }{Selector: selector}); err != nil {
@@ -328,6 +363,58 @@ func (h *Handler) handleMetric(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// promLabelName matches a legal Prometheus label name; selector keys
+// outside it cannot exist as stored labels, so they're rejected
+// rather than silently matching nothing.
+var promLabelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// promMatchersFromSelector converts a Kubernetes label selector into
+// PromQL matchers, prefixed with "," for appending to an existing
+// selector body. All six requirement operators are expressible:
+// equality/inequality map directly, set membership becomes an
+// anchored alternation regex, and (non-)existence uses the Prometheus
+// convention that an absent label equals "".
+func promMatchersFromSelector(raw string) (string, error) {
+	sel, err := labels.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	reqs, _ := sel.Requirements()
+	var b strings.Builder
+	for _, req := range reqs {
+		// Accept OTel-style dotted keys (k8s.pod.name) as aliases for
+		// their stored Prometheus form (k8s_pod_name).
+		key := strings.ReplaceAll(req.Key(), ".", "_")
+		if !promLabelName.MatchString(key) {
+			return "", fmt.Errorf("label key %q is not expressible as a Prometheus label", req.Key())
+		}
+		vals := req.Values().List()
+		switch req.Operator() {
+		case selection.Equals, selection.DoubleEquals:
+			b.WriteString(fmt.Sprintf(",%s=%q", key, vals[0]))
+		case selection.NotEquals:
+			b.WriteString(fmt.Sprintf(",%s!=%q", key, vals[0]))
+		case selection.In, selection.NotIn:
+			quoted := make([]string, len(vals))
+			for i, v := range vals {
+				quoted[i] = regexp.QuoteMeta(v)
+			}
+			op := "=~"
+			if req.Operator() == selection.NotIn {
+				op = "!~"
+			}
+			b.WriteString(fmt.Sprintf(",%s%s%q", key, op, strings.Join(quoted, "|")))
+		case selection.Exists:
+			b.WriteString(fmt.Sprintf(",%s!=\"\"", key))
+		case selection.DoesNotExist:
+			b.WriteString(fmt.Sprintf(",%s=\"\"", key))
+		default:
+			return "", fmt.Errorf("operator %q is not supported", req.Operator())
+		}
+	}
+	return b.String(), nil
+}
+
 func writeStatusError(w http.ResponseWriter, code int, msg string) {
 	reason := metav1.StatusReasonInternalError
 	switch code {
@@ -335,6 +422,8 @@ func writeStatusError(w http.ResponseWriter, code int, msg string) {
 		reason = metav1.StatusReasonNotFound
 	case http.StatusNotImplemented:
 		reason = metav1.StatusReasonMethodNotAllowed
+	case http.StatusBadRequest:
+		reason = metav1.StatusReasonBadRequest
 	}
 	writeJSON(w, code, metav1.Status{
 		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},

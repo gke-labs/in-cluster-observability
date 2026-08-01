@@ -45,7 +45,9 @@ kubectl get apiservice v1beta1.custom.metrics.k8s.io \
    — a built-in template, overridable via the `ollie-custom-metrics`
    ConfigMap. Built-ins also cover `latency_p50`, `latency_p99`,
    `bytes_in_per_sec`, `bytes_out_per_sec` over pods, deployments,
-   statefulsets, daemonsets, and services.
+   statefulsets, and daemonsets. (`services` is not served by default:
+   OBI's `service_name` label is OTel service attribution, not the K8s
+   Service object — opt in via the ConfigMap if yours line up.)
 3. **`hpa.yaml`** targets `500m` qps per replica (an Object metric with
    `AverageValue` semantics: desired replicas = total qps ÷ target).
    Against ~5 rps of traffic, the HPA walks the Deployment from 1 up to

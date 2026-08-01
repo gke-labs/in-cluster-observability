@@ -51,8 +51,9 @@ kubectl get --raw \
 You should see a `MetricValueList` with a value around `5` (the demo
 client's request rate). Other built-in metrics work the same way:
 `latency_p50`, `latency_p99`, `bytes_in_per_sec`, `bytes_out_per_sec`,
-over `pods`, `deployments`, `statefulsets`, `daemonsets`, and
-`services`. Custom PromQL templates go in the `ollie-custom-metrics`
+over `pods`, `deployments`, `statefulsets`, and `daemonsets`. Custom
+PromQL templates (and opting `services` in, if your OBI service naming
+matches your Service objects) go in the `ollie-custom-metrics`
 ConfigMap (`k8s/custommetrics.yaml`).
 
 ## 3. Apply the HPA and watch it scale
