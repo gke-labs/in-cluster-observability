@@ -17,10 +17,12 @@ package streamsvc
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/parser"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -83,9 +85,24 @@ func (s *QueryServer) SubscribeSpans(req *streamv1.SubscribeSpansRequest, srv st
 	defer cancel()
 
 	events := make(chan *streamv1.SpanEvent, 256)
+	var live sync.WaitGroup
 	for _, addr := range addrs {
-		go s.forwardAgent(ctx, addr, req, events, logger)
+		live.Add(1)
+		go func(addr string) {
+			defer live.Done()
+			s.forwardAgent(ctx, addr, req, events, logger)
+		}(addr)
 	}
+	// When the last upstream forwarder exits, the subscription can
+	// never produce another span. Ending the stream with a status —
+	// instead of hanging open silently (#190) — lets the subscriber
+	// distinguish "every agent is gone / rejected us" from "no
+	// matching traffic" and resubscribe (picking up current agents).
+	allGone := make(chan struct{})
+	go func() {
+		live.Wait()
+		close(allGone)
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -93,6 +110,19 @@ func (s *QueryServer) SubscribeSpans(req *streamv1.SubscribeSpansRequest, srv st
 		case ev := <-events:
 			if err := srv.Send(ev); err != nil {
 				return err
+			}
+		case <-allGone:
+			// Drain what the forwarders buffered before they exited.
+			for {
+				select {
+				case ev := <-events:
+					if err := srv.Send(ev); err != nil {
+						return err
+					}
+				default:
+					return status.Error(codes.Unavailable,
+						"all upstream agent streams ended (agents restarted, or every subscription was rejected); resubscribe")
+				}
 			}
 		}
 	}
@@ -156,7 +186,15 @@ func (s *QueryServer) StreamMetrics(req *streamv1.StreamMetricsRequest, srv stre
 		now := time.Now()
 		vec, degraded, err := s.Eval.InstantVectorDegraded(ctx, req.GetPromql(), now)
 		if err != nil {
-			return status.Errorf(codes.InvalidArgument, "promql: %v", err)
+			// Only a parse/type error is the caller's fault (#190):
+			// evaluation can also fail transiently (agents mid-roll,
+			// deadline pressure), and InvalidArgument tells
+			// well-behaved clients to stop retrying. Classify by
+			// parsing the expression ourselves.
+			if _, perr := parser.NewParser(parser.Options{}).ParseExpr(req.GetPromql()); perr != nil {
+				return status.Errorf(codes.InvalidArgument, "promql: %v", perr)
+			}
+			return status.Errorf(codes.Unavailable, "promql evaluation: %v", err)
 		}
 		for _, smp := range vec {
 			lbls := map[string]string{}

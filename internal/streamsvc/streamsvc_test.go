@@ -27,7 +27,9 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gke-labs/in-cluster-observability/internal/store"
@@ -143,6 +145,47 @@ func TestAgentSubscribeFiltered(t *testing.T) {
 	}
 }
 
+// TestAgentSubscribeRuntimeCELError (#186): a filter that errors on
+// one span — the documented example filter throws "no such key" on
+// any span lacking the attribute — must treat that span as a
+// non-match and keep the stream alive, not tear it down.
+func TestAgentSubscribeRuntimeCELError(t *testing.T) {
+	buf := store.NewSpanBuffer(64, nil)
+	addr := startAgent(t, buf)
+	client := dialStream(t, addr)
+
+	stream, err := client.SubscribeSpans(t.Context(), &streamv1.SubscribeSpansRequest{
+		CelFilter: `resource["k8s.namespace.name"] == "shop"`,
+	})
+	if err != nil {
+		t.Fatalf("SubscribeSpans: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// A span with NO resource attributes: the filter errors on it.
+	buf.AppendRequest(&colltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{
+			ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{
+				Name:              "no-resource",
+				StartTimeUnixNano: uint64(time.Now().UnixNano()), //nolint:gosec
+			}}}},
+		}},
+	})
+	appendSpan(buf, "shop", "still-alive")
+
+	ev, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("stream died on a per-span CEL error: %v", err)
+	}
+	var span tracepb.Span
+	if err := proto.Unmarshal(ev.GetSpan(), &span); err != nil {
+		t.Fatalf("span decode: %v", err)
+	}
+	if span.GetName() != "still-alive" {
+		t.Fatalf("got span %q, want still-alive", span.GetName())
+	}
+}
+
 // TestAgentSubscribeBadFilter: compile errors surface as
 // InvalidArgument on the stream, not as silent empties.
 func TestAgentSubscribeBadFilter(t *testing.T) {
@@ -197,6 +240,62 @@ func TestQueryServerMux(t *testing.T) {
 	}
 	if !got["from-agent-1"] || !got["from-agent-2"] {
 		t.Fatalf("mux missed an agent: %v", got)
+	}
+}
+
+// TestQueryServerMuxAllUpstreamsGone (#190): when every upstream
+// agent stream ends, the mux must end the subscription with a status
+// instead of hanging open silently — otherwise "all agents restarted"
+// and "auth rejected everywhere" are indistinguishable from "no
+// matching traffic".
+func TestQueryServerMuxAllUpstreamsGone(t *testing.T) {
+	buf := store.NewSpanBuffer(64, nil)
+	ags := grpc.NewServer()
+	streamv1.RegisterStreamServiceServer(ags, &AgentServer{Spans: buf})
+	al, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go ags.Serve(al) //nolint:errcheck
+	t.Cleanup(ags.Stop)
+
+	qs := &QueryServer{Agents: staticAddrs{al.Addr().String()}}
+	gs := grpc.NewServer()
+	streamv1.RegisterStreamServiceServer(gs, qs)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go gs.Serve(l) //nolint:errcheck
+	t.Cleanup(gs.Stop)
+
+	stream, err := dialStream(t, l.Addr().String()).SubscribeSpans(t.Context(), &streamv1.SubscribeSpansRequest{})
+	if err != nil {
+		t.Fatalf("SubscribeSpans: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// A span before the outage is delivered normally.
+	appendSpan(buf, "ns", "before-outage")
+	if ev, err := stream.Recv(); err != nil || ev == nil {
+		t.Fatalf("Recv before outage: %v", err)
+	}
+
+	// The only agent goes away: the subscriber must get a terminal
+	// status promptly, not a silent hang.
+	ags.Stop()
+	done := make(chan error, 1)
+	go func() {
+		_, err := stream.Recv()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if status.Code(err) != codes.Unavailable {
+			t.Fatalf("Recv after outage = %v, want Unavailable", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream hung open after all upstreams ended")
 	}
 }
 
