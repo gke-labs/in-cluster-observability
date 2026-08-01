@@ -24,10 +24,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -35,11 +37,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/gke-labs/in-cluster-observability/internal/ca"
 	v1alpha1 "github.com/gke-labs/in-cluster-observability/pkg/controller/api/v1alpha1"
 	cppb "github.com/gke-labs/in-cluster-observability/pkg/controller/pb/controlplane/v1"
 	"github.com/gke-labs/in-cluster-observability/pkg/controller/reconciler"
@@ -57,6 +62,19 @@ func main() {
 	leaderElection := flag.Bool("leader-elect", true, "enable Lease-based leader election (one replica accepts agent streams at a time)")
 	leaderElectionID := flag.String("leader-election-id", "ollie-controller", "Lease name for leader election")
 	leaderElectionNS := flag.String("leader-election-namespace", "", "namespace for the leader-election Lease; empty = in-cluster namespace")
+
+	// Self-managed CA (ADR-0028, #196): the leader mints a CA, issues
+	// the query serving cert, injects it into the custom-metrics
+	// APIService caBundle, and drops insecureSkipTLSVerify once every
+	// query endpoint serves it. No cert-manager dependency.
+	enableCA := flag.Bool("enable-ca", true, "run the self-managed CA manager: mint the ollie CA, issue the query serving cert, and wire the custom-metrics APIService caBundle (ADR-0028)")
+	caNamespace := flag.String("ca-namespace", "", "namespace holding the CA and serving-cert Secrets; empty = in-cluster namespace (falls back to ollie-system)")
+	caSecret := flag.String("ca-secret", "ollie-ca", "Secret name for the self-managed CA cert+key")
+	caServingSecret := flag.String("ca-serving-secret", "ollie-query-serving", "Secret name for the query serving cert+key issued by the CA")
+	caQueryService := flag.String("ca-query-service", "ollie-query", "query Service whose ready endpoints back the custom-metrics :6443 port; gates the insecureSkipTLSVerify flip")
+	caTLSPort := flag.Int("ca-tls-port", 6443, "query custom-metrics TLS port probed by the flip gate")
+	caAPIService := flag.String("ca-apiservice", "v1beta1.custom.metrics.k8s.io", "APIService whose caBundle the CA manager populates")
+	caServingLifetime := flag.Duration("ca-serving-lifetime", ca.ServingDefaultLifetime, "validity of issued query serving certs (renewed before expiry)")
 	flag.Parse()
 
 	if *versionOnly {
@@ -119,6 +137,40 @@ func main() {
 		fatalf("setup PodReconciler: %v\n", err)
 	}
 
+	// Self-managed CA manager (ADR-0028). Runs only on the elected
+	// leader (NeedLeaderElection), so it is the single writer of the CA
+	// Secret, the serving-cert Secret, and the APIService caBundle.
+	if *enableCA {
+		ns := *caNamespace
+		if ns == "" {
+			ns = inClusterNamespace()
+		}
+		clientset, cErr := kubernetes.NewForConfig(cfg)
+		if cErr != nil {
+			fatalf("build clientset for CA manager: %v\n", cErr)
+		}
+		dyn, dErr := dynamic.NewForConfig(cfg)
+		if dErr != nil {
+			fatalf("build dynamic client for CA manager: %v\n", dErr)
+		}
+		caMgr := &ca.Manager{
+			Clientset:       clientset,
+			APISvc:          ca.NewDynamicAPIServiceStore(dyn, *caAPIService),
+			Namespace:       ns,
+			CASecret:        *caSecret,
+			ServingSecret:   *caServingSecret,
+			ServingDNSNames: servingDNSNames(*caQueryService, ns),
+			QueryService:    *caQueryService,
+			TLSPort:         *caTLSPort,
+			ServingLifetime: *caServingLifetime,
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)).With("component", "ca-manager"),
+		}
+		if aErr := mgr.Add(caMgr); aErr != nil {
+			fatalf("register CA manager: %v\n", aErr)
+		}
+		fmt.Fprintf(os.Stderr, "self-managed CA manager enabled (namespace=%s, apiservice=%s)\n", ns, *caAPIService)
+	}
+
 	if err := mgr.AddHealthzCheck("alive", func(_ *http.Request) error { return nil }); err != nil {
 		fatalf("AddHealthzCheck: %v\n", err)
 	}
@@ -163,4 +215,28 @@ func main() {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format, args...)
 	os.Exit(1)
+}
+
+// inClusterNamespace returns the namespace this pod runs in, read from
+// the ServiceAccount projection, defaulting to ollie-system when it is
+// unreadable (e.g. `go run` outside a cluster).
+func inClusterNamespace() string {
+	const saNS = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	if b, err := os.ReadFile(saNS); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	return "ollie-system"
+}
+
+// servingDNSNames builds the SANs for the query serving cert from the
+// Service name and namespace: the aggregator connects via the Service
+// DNS, so both the short and cluster-local forms must be present.
+func servingDNSNames(service, namespace string) []string {
+	return []string{
+		fmt.Sprintf("%s.%s.svc", service, namespace),
+		fmt.Sprintf("%s.%s.svc.cluster.local", service, namespace),
+		"localhost",
+	}
 }

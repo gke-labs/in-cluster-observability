@@ -479,6 +479,60 @@ func TestMultiNodeFanout(t *testing.T) {
 // the query front-proxy's mTLS on :6443 and the agent scrape token on
 // :9090. Both are probed from a bare pod in the default namespace with
 // no ollie credentials.
+// TestCustomMetricsTLSVerification is the #196 / ADR-0028 gate: the
+// self-managed CA (run by the controller, no cert-manager) issues
+// ollie-query's :6443 serving cert, the controller injects the CA into
+// the APIService caBundle, and — once every query endpoint is confirmed
+// to serve the CA-signed cert — drops insecureSkipTLSVerify. The proof
+// that the whole chain is correct is that the aggregator VERIFIES the
+// backend cert against the caBundle afterwards and still reports the
+// APIService Available: that could not be shown in v0.5, where
+// insecureSkipTLSVerify masked verification entirely.
+func TestCustomMetricsTLSVerification(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, sharedClusterName)
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+
+	const apisvc = "v1beta1.custom.metrics.k8s.io"
+
+	// The controller minted a CA and wrote it into spec.caBundle.
+	h.PollKubectl(3*time.Minute, "custom-metrics APIService caBundle injected by self-managed CA",
+		func() (string, error) {
+			return h.KubectlOutput("get", "apiservice", apisvc, "-o", `jsonpath={.spec.caBundle}`)
+		},
+		func(out string) bool { return len(strings.TrimSpace(out)) > 0 })
+
+	// The flip gate cleared: every ready query endpoint serves the CA
+	// cert, so the controller dropped insecureSkipTLSVerify. Kubelet
+	// remounts the optional serving Secret and the query reloads it a
+	// short while after the controller creates it, so this can take a
+	// couple of resync passes.
+	h.PollKubectl(4*time.Minute, "custom-metrics APIService insecureSkipTLSVerify dropped",
+		func() (string, error) {
+			return h.KubectlOutput("get", "apiservice", apisvc, "-o", `jsonpath={.spec.insecureSkipTLSVerify}`)
+		},
+		func(out string) bool { return strings.TrimSpace(out) != "true" })
+
+	// With verification now on, Available=True proves the CA-issued
+	// serving cert and its SANs line up with the injected caBundle.
+	h.PollKubectl(2*time.Minute, "custom-metrics APIService Available under real TLS verification",
+		func() (string, error) {
+			return h.KubectlOutput("get", "apiservice", apisvc,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`)
+		},
+		func(out string) bool { return strings.TrimSpace(out) == "True" })
+}
+
 func TestAuthBoundaries(t *testing.T) {
 	if os.Getenv("RUN_E2E") == "" {
 		t.Skip("RUN_E2E not set, skipping e2e test")

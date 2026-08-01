@@ -15,11 +15,16 @@
 # custom.metrics.k8s.io aggregation (v0.5, #96): the HPA reads our
 # metrics through standard K8s API aggregation, backed by ollie-query.
 #
-# TLS posture per ADR-0025 §7: ollie-query serves a startup-generated
-# self-signed certificate and the APIService sets
-# insecureSkipTLSVerify. The v0.6 TLS milestone replaces the SERVING
-# cert with a real CA bundle (cert-manager or CA injection); tracked
-# there deliberately rather than half-done here.
+# TLS posture per ADR-0028 (#196): the ollie-controller runs a self-
+# managed CA (no cert-manager dependency). On the elected leader it
+# mints a CA, issues ollie-query's serving cert (mounted from the
+# ollie-query-serving Secret), writes the CA into spec.caBundle below,
+# and then drops insecureSkipTLSVerify once every query endpoint is
+# confirmed to serve the CA-signed cert. This manifest ships
+# insecureSkipTLSVerify:true as the safe bootstrap default: a fresh
+# `kubectl apply -k` is never broken before the controller runs, and
+# the flip is self-healing. Do not remove it here — the controller owns
+# the transition.
 #
 # CLIENT auth is not deferred: ollie-query requires the aggregation
 # layer's front-proxy (requestheader) client certificate on :6443

@@ -858,6 +858,36 @@ Two sequencing rules ride with this ADR:
 
 ---
 
+## ADR-0028: v0.6 self-managed CA for the custom-metrics serving cert (#196)
+
+**Status:** Accepted, 2026-08-01.
+
+**Context.** v0.5 shipped the custom.metrics.k8s.io backend on `:6443` with a *serving*-side shortcut (ADR-0025 §7): `ollie-query` minted an ephemeral in-memory self-signed cert at startup and the APIService registered with `insecureSkipTLSVerify: true`. Client auth was **not** shortcut — v0.5.1/ADR-0027 §1 closed the `:6443` bypass with front-proxy mTLS. What remained was the serving side: with `insecureSkipTLSVerify` the aggregator does not verify the backend cert at all, so a MITM on the in-cluster hop to `ollie-query` is undetectable, and the deferral was explicitly parked for v0.6. Gari's constraint for this leg: **no cert-manager dependency** — a self-managed CA.
+
+The single hard hazard is the transition. Dropping `insecureSkipTLSVerify` while any query replica still serves a cert the aggregator can't verify makes the `custom.metrics.k8s.io` APIService go `Unavailable`, which breaks every HPA reading through it and can disturb API discovery. So the flip from `insecureSkipTLSVerify:true` to `false` must be **atomic with** a valid `caBundle` and a serving cert that actually chains to it, on **every** endpoint.
+
+**Decision.** A self-managed CA owned by `ollie-controller`, with the flip gated on observed endpoint state.
+
+1. **CA lives in the controller, under leader election.** A new `internal/ca` package holds the pure crypto (mint CA, issue CA-signed serving certs, verify a served leaf chains to the CA) — cluster-free and unit-tested, since the integration path can only run in CI. A `ca.Manager` runs as a controller-runtime `Runnable` with `NeedLeaderElection() == true`, so exactly one replica writes cluster state; no two-writer race. This one mechanism also serves #90's webhook caBundle later — the decisive reason to put CA ownership here rather than have `ollie-query` self-bootstrap (which would need its own Lease and a secrets-write + apiservices-patch grant on the query SA).
+2. **Storage.** `ollie-ca` Secret (cert **and** key; the key never leaves the controller) and `ollie-query-serving` Secret (leaf + key, plus `ca.crt` for #197 consumers), both `kubernetes.io/tls`, both in the install namespace. The CA is long-lived (5y); serving certs are short (90d) and renewed at ~⅓ life on the resync loop.
+3. **Serving cert consumption.** `ollie-query` loads the serving cert from the mounted Secret via `tls.Config.GetCertificate` with an mtime-triggered hot reload, so a rotation is picked up without a restart. The volume is `optional: true` and `GetCertificate` **falls back to the old self-signed bootstrap cert** when the Secret is not yet mounted — a fresh `kubectl apply -k` never blocks query startup on the controller, and `ClientCAs`/`RequireAndVerifyClientCert` (ADR-0027 §1) are left untouched: the serving cert (`Certificates`→`GetCertificate`) and the front-proxy client-auth are orthogonal fields trusting different CAs.
+4. **caBundle injection is unconditional; the flip is gated.** Each reconcile the manager writes the CA into `APIService.spec.caBundle` (safe while `insecureSkipTLSVerify` is still true), then drops `insecureSkipTLSVerify` **only after** probing every *ready* `ollie-query` endpoint on `:6443` and confirming each presents a leaf that chains to the current CA. Greenfield satisfies the gate on the first pass with endpoints up; an upgrade from the v0.5 self-signed posture waits out the query rollout. The manifest ships `insecureSkipTLSVerify: true` as the safe bootstrap default — the controller owns the transition, and it self-heals. The APIService is patched through the **dynamic client** (`apiregistration.k8s.io/v1` is not otherwise a dependency; adding kube-aggregator's typed clientset was not worth it).
+5. **The flip-gate probe forces TLS 1.3.** `:6443` requires a client cert, but under TLS 1.3 the server's client-cert check is *post-handshake*, so a certless probe still completes the handshake and observes the served cert (and never sends a request). Forcing `MinVersion: TLS 1.3` on the probe avoids the TLS 1.2 mid-handshake abort — the same post-handshake semantics documented in the Phase-1b `TestAuthBoundaries` probe.
+
+**Scope.** This ADR covers #196 (serving cert + caBundle + flip). #197 (intra-ollie TLS on the plaintext `:9091`/`:9092`/`:9095`/`:9096` hops) and #90 (validating webhook) ride the same CA machinery in follow-up PRs. #198 (per-user delegated SAR) stays deferred: kube-apiserver enforces the HPA controller's RBAC before proxying, and `:6443` already authenticates the aggregator by mTLS, so it adds little until non-HPA callers hit `:6443` directly.
+
+**Consequences.**
+
+- ✅ The aggregator verifies the `ollie-query` serving cert against a CA ollie controls; `insecureSkipTLSVerify` is gone in steady state, closing the ADR-0025 §7 serving-side deferral without cert-manager.
+- ✅ The takedown hazard is structurally prevented: the flip cannot happen until observed endpoint state proves it is safe, so a bad SAN or an in-progress rollout degrades to "still insecureSkipTLSVerify" rather than "APIService Unavailable".
+- ✅ Serving-cert rotation is restart-free; the CA + `internal/ca` crypto are reused by #197/#90.
+- ⚠️ **CA rotation** is not yet automated: the CA is minted once and a corrupt `ollie-ca` Secret is surfaced, not silently overwritten (overwriting would strand the distributed `caBundle`). Automatic CA rotation needs a two-phase dual-CA `caBundle` overlap and is left for a follow-up.
+- 📌 New RBAC: controller gains cluster `apiservices` get/list/watch/update/patch and a namespaced Role (secrets CRUD + endpoints get) in the install namespace — its only Secret access is the two objects it owns. e2e proof is `TestCustomMetricsTLSVerification`: caBundle injected, `insecureSkipTLSVerify` dropped, and the APIService `Available` **under real verification** — which `insecureSkipTLSVerify` masked in v0.5.
+
+**Implemented in.** `v0.6/phase-2-tls-ca`.
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.

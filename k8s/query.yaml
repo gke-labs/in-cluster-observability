@@ -56,8 +56,12 @@ spec:
             - --agent-service=ollie-agent.ollie-system.svc.cluster.local
             - --agent-port=9091
             # custom.metrics.k8s.io backend for the aggregation
-            # layer (#96); self-signed TLS per ADR-0025 §7.
+            # layer (#96). Serving cert is issued by the self-managed CA
+            # (ADR-0028) and mounted from ollie-query-serving below;
+            # falls back to a self-signed bootstrap cert until it exists.
             - --tls-addr=0.0.0.0:6443
+            - --tls-cert-file=/etc/ollie/tls/tls.crt
+            - --tls-key-file=/etc/ollie/tls/tls.key
             - --custom-metrics-config=/etc/ollie/custom-metrics/config.yaml
             # Cluster-wide stream service (#99).
             - --stream-addr=0.0.0.0:9096
@@ -98,10 +102,22 @@ spec:
             - name: custom-metrics-config
               mountPath: /etc/ollie/custom-metrics
               readOnly: true
+            - name: serving-cert
+              mountPath: /etc/ollie/tls
+              readOnly: true
       volumes:
         - name: custom-metrics-config
           configMap:
             name: ollie-custom-metrics
+            optional: true
+        # CA-issued serving cert (ADR-0028), created by the controller at
+        # runtime. optional:true so query starts before the controller
+        # has issued it — GetCertificate serves a self-signed bootstrap
+        # cert until kubelet mounts the real one, and the APIService stays
+        # insecureSkipTLSVerify:true until the controller flips it.
+        - name: serving-cert
+          secret:
+            secretName: ollie-query-serving
             optional: true
 ---
 apiVersion: v1

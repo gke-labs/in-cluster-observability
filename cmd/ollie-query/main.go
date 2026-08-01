@@ -41,6 +41,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/gke-labs/in-cluster-observability/internal/ca"
 	"github.com/gke-labs/in-cluster-observability/internal/custommetrics"
 	"github.com/gke-labs/in-cluster-observability/internal/fanout"
 	"github.com/gke-labs/in-cluster-observability/internal/frontproxy"
@@ -68,8 +69,10 @@ func main() {
 	tokenFile := flag.String("agent-token-file", defaultTokenFile, "bearer token file presented to the agents' authenticated read endpoints (empty disables)")
 	apiAuth := flag.String("api-auth", "auto", "authn/authz for /api/v1/* (same posture as the agent's --scrape-auth): 'token' validates bearer tokens via TokenReview + SubjectAccessReview against the request path as nonResourceURL (grant via the ollie-promql-reader ClusterRole); 'none' disables; 'auto' picks token in-cluster. Health probes are always unauthenticated; loopback is always exempt (port-forward debugging).")
 	apiAuthAudiences := flag.String("api-auth-audiences", "", "comma-separated token audiences for --api-auth=token; empty accepts standard API-server-audience tokens")
-	tlsAddr := flag.String("tls-addr", "0.0.0.0:6443", "bind address for the HTTPS listener serving custom.metrics.k8s.io to the aggregation layer (#96). Serves a startup-generated self-signed cert; the APIService registers with insecureSkipTLSVerify per ADR-0025 §7 (real CA wiring is v0.6). Empty disables.")
-	tlsHostnames := flag.String("tls-hostnames", "ollie-query.ollie-system.svc,ollie-query.ollie-system.svc.cluster.local,localhost", "comma-separated DNS SANs for the self-signed serving cert")
+	tlsAddr := flag.String("tls-addr", "0.0.0.0:6443", "bind address for the HTTPS listener serving custom.metrics.k8s.io to the aggregation layer (#96). Empty disables.")
+	tlsHostnames := flag.String("tls-hostnames", "ollie-query.ollie-system.svc,ollie-query.ollie-system.svc.cluster.local,localhost", "comma-separated DNS SANs for the self-signed bootstrap cert used until the CA-issued serving cert is mounted")
+	tlsCertFile := flag.String("tls-cert-file", "/etc/ollie/tls/tls.crt", "PEM serving cert issued by the self-managed CA (ADR-0028), mounted from the ollie-query-serving Secret; hot-reloaded on rotation. Falls back to a self-signed bootstrap cert when absent (fresh install / dev).")
+	tlsKeyFile := flag.String("tls-key-file", "/etc/ollie/tls/tls.key", "PEM serving key paired with --tls-cert-file")
 	cmClientAuth := flag.String("custom-metrics-client-auth", "auto", "authn for the :6443 custom-metrics listener. 'requestheader' requires a client certificate signed by the cluster's front-proxy (requestheader) CA — the identity the aggregation layer presents — so no unauthenticated pod can read cluster-wide metrics; the CA is loaded from kube-system/extension-apiserver-authentication (grant via the ollie-query SA's binding to extension-apiserver-authentication-reader). 'none' disables client-cert auth (dev/`go run` only; the port is then unauthenticated). 'auto' picks requestheader in-cluster, none otherwise.")
 	cmConfig := flag.String("custom-metrics-config", "/etc/ollie/custom-metrics/config.yaml", "path to the metric-path -> PromQL template config (ConfigMap-mounted; missing file falls back to built-in defaults)")
 	streamAddr := flag.String("stream-addr", "0.0.0.0:9096", "bind address for the cluster-wide gRPC StreamService (#99): CEL span subscriptions multiplexed across agents + periodic PromQL streams. Empty disables. Auth follows --api-auth (ollie-stream-reader ClusterRole; loopback exempt).")
@@ -186,12 +189,26 @@ func main() {
 			logger.Error("custom-metrics init failed", "err", err)
 			os.Exit(1)
 		}
-		cert, err := custommetrics.SelfSignedCert(strings.Split(*tlsHostnames, ","))
+		// Serving cert: prefer the CA-issued cert mounted from the
+		// ollie-query-serving Secret (ADR-0028), hot-reloaded on
+		// rotation. Until the controller's CA manager has issued it
+		// (fresh install) or when running outside a cluster (dev), fall
+		// back to a self-signed bootstrap cert — the APIService stays
+		// insecureSkipTLSVerify:true until the controller confirms every
+		// endpoint serves the CA cert and flips it.
+		bootstrap, err := custommetrics.SelfSignedCert(strings.Split(*tlsHostnames, ","))
 		if err != nil {
 			logger.Error("self-signed cert generation failed", "err", err)
 			os.Exit(1)
 		}
-		tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		reloader := ca.NewReloader(*tlsCertFile, *tlsKeyFile, logger)
+		getCertificate := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if cert, rErr := reloader.GetCertificate(hello); rErr == nil {
+				return cert, nil
+			}
+			return &bootstrap, nil
+		}
+		tlsConf := &tls.Config{GetCertificate: getCertificate, MinVersion: tls.VersionTLS12}
 		cmHandler := http.Handler(cm.Routes())
 
 		// Require the aggregation layer's front-proxy client certificate

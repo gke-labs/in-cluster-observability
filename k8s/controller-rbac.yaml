@@ -65,6 +65,52 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Self-managed CA (ADR-0028, #196): the leader injects the CA into the
+  # custom-metrics APIService caBundle and drops insecureSkipTLSVerify.
+  # APIServices are cluster-scoped, so this grant is cluster-wide; it is
+  # patch-only on a resource the controller does not otherwise touch.
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+---
+# Namespaced grant for the self-managed CA (ADR-0028): the controller
+# creates/rotates the CA and query serving-cert Secrets in its own
+# namespace, and reads the query Service endpoints to gate the
+# insecureSkipTLSVerify flip. Scoped to ollie-system rather than folded
+# into the cluster-wide role — the controller's only Secret access is
+# these two objects it owns.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ollie-controller-ca
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ollie-controller-ca
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ollie-controller-ca
+subjects:
+  - kind: ServiceAccount
+    name: ollie-controller
+    namespace: ollie-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
