@@ -495,6 +495,12 @@ func TestAuthBoundaries(t *testing.T) {
 	h.InstallOllie(repoRoot)
 	h.BuildProbeImage(repoRoot)
 
+	// Create the permitted scraper namespace up front (used by boundary
+	// 2b) so kindnet's NetworkPolicy controller has synced its
+	// kubernetes.io/metadata.name label into its informer cache well
+	// before the probe that relies on it runs.
+	h.EnsureNamespace("gmp-system")
+
 	// Boundary 1 — the :6443 front-proxy requires a client cert chaining
 	// to the requestheader CA (RequireAndVerifyClientCert). A certless
 	// bare pod must be rejected — the auth bypass closed in v0.5.1 (#180).
@@ -546,8 +552,7 @@ func TestAuthBoundaries(t *testing.T) {
 	// tokenless GET must be 401. This isolates the token check from the
 	// network check above — without the permitted namespace the request
 	// would be dropped before auth ever ran (which is exactly what bit an
-	// earlier version of this test).
-	h.EnsureNamespace("gmp-system")
+	// earlier version of this test). gmp-system was created up front.
 	out = h.RunProbe("gmp-system", "probe-scrape", "get",
 		fmt.Sprintf("http://%s:9090/metrics", agentIP))
 	if !strings.Contains(out, "STATUS 401") {
