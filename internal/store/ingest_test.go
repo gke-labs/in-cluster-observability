@@ -104,3 +104,46 @@ func TestIngesterTick(t *testing.T) {
 		t.Errorf(`test_ingest_up{k8s_node_name="node-b"} = %v, want empty`, vec)
 	}
 }
+
+// TestIngesterStaleness (#191): a series present one tick and absent
+// the next gets an explicit staleness marker, so PromQL stops
+// returning it immediately instead of holding the last value for the
+// ~5m lookback window.
+func TestIngesterStaleness(t *testing.T) {
+	s, err := New(Config{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	reg := prometheus.NewRegistry()
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_stale_gauge", Help: "test"})
+	gauge.Set(7)
+	reg.MustRegister(gauge)
+
+	ing := NewIngester(s, reg, nil, time.Second, nil, "node-a")
+	ing.Tick(t.Context())
+	if vec := queryInstant(t, s, `test_stale_gauge`, time.Now()); len(vec) != 1 || vec[0].F != 7 {
+		t.Fatalf("before unregister: %v, want 7", vec)
+	}
+
+	// The collector disappears (pod churn / eviction analog). The next
+	// tick must retire the series, not let it coast on lookback.
+	// (Real ticks are >= 1s apart; space them so same-millisecond
+	// appends don't collide on timestamp in this test.)
+	reg.Unregister(gauge)
+	time.Sleep(5 * time.Millisecond)
+	ing.Tick(t.Context())
+	if vec := queryInstant(t, s, `test_stale_gauge`, time.Now()); len(vec) != 0 {
+		t.Fatalf("after unregister: %v, want empty (stale)", vec)
+	}
+
+	// Re-appearing later is fine: a fresh sample supersedes the marker.
+	reg.MustRegister(gauge)
+	gauge.Set(9)
+	time.Sleep(5 * time.Millisecond)
+	ing.Tick(t.Context())
+	if vec := queryInstant(t, s, `test_stale_gauge`, time.Now()); len(vec) != 1 || vec[0].F != 9 {
+		t.Fatalf("after re-register: %v, want 9", vec)
+	}
+}

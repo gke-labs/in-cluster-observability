@@ -20,12 +20,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/golang/snappy"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/prompb"
 
 	"github.com/gke-labs/in-cluster-observability/internal/store"
@@ -51,6 +54,9 @@ type RemoteWriteConfig struct {
 type RemoteWriter struct {
 	cfg   RemoteWriteConfig
 	relay *Relay[*prompb.WriteRequest]
+	// prevSeries tracks the previous snapshot's series identities for
+	// staleness markers (#191). Only the Run goroutine touches it.
+	prevSeries map[string][]prompb.Label
 }
 
 // NewRemoteWriter builds the exporter.
@@ -131,6 +137,7 @@ func (w *RemoteWriter) snapshot() *prompb.WriteRequest {
 	}
 	ts := time.Now().UnixMilli()
 	wr := &prompb.WriteRequest{}
+	cur := make(map[string][]prompb.Label, len(w.prevSeries))
 	for _, fam := range fams {
 		for _, m := range fam.GetMetric() {
 			for _, smp := range store.Flatten(fam, m) {
@@ -146,6 +153,7 @@ func (w *RemoteWriter) snapshot() *prompb.WriteRequest {
 					lbls = append(lbls, prompb.Label{Name: "quantile", Value: smp.Quantile})
 				}
 				sort.Slice(lbls, func(i, j int) bool { return lbls[i].Name < lbls[j].Name })
+				cur[seriesKey(lbls)] = lbls
 				wr.Timeseries = append(wr.Timeseries, prompb.TimeSeries{
 					Labels:  lbls,
 					Samples: []prompb.Sample{{Value: smp.Value, Timestamp: ts}},
@@ -153,5 +161,31 @@ func (w *RemoteWriter) snapshot() *prompb.WriteRequest {
 			}
 		}
 	}
+	// Staleness markers (#191), mirroring the tsdb ingester: a series
+	// present last interval but gone now gets an explicit StaleNaN so
+	// the downstream TSDB retires it immediately instead of holding
+	// the last value for its lookback window.
+	for key, lbls := range w.prevSeries {
+		if _, ok := cur[key]; ok {
+			continue
+		}
+		wr.Timeseries = append(wr.Timeseries, prompb.TimeSeries{
+			Labels:  lbls,
+			Samples: []prompb.Sample{{Value: math.Float64frombits(value.StaleNaN), Timestamp: ts}},
+		})
+	}
+	w.prevSeries = cur
 	return wr
+}
+
+// seriesKey renders sorted labels as a stable map key.
+func seriesKey(lbls []prompb.Label) string {
+	var b strings.Builder
+	for _, l := range lbls {
+		b.WriteString(l.Name)
+		b.WriteByte(0xff)
+		b.WriteString(l.Value)
+		b.WriteByte(0xfe)
+	}
+	return b.String()
 }

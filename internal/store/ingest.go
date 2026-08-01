@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/value"
 )
 
 // Ingester feeds the store by periodically gathering a Prometheus
@@ -46,6 +47,11 @@ type Ingester struct {
 	interval time.Duration
 	logger   *slog.Logger
 	nodeName string
+
+	// prevSeries is the identity set of the previous tick's appended
+	// series, used to emit staleness markers (#191). Only Tick reads
+	// or writes it, and Run calls Tick sequentially.
+	prevSeries map[uint64]labels.Labels
 
 	samplesAppended prometheus.Counter
 	appendErrors    prometheus.Counter
@@ -117,6 +123,7 @@ func (ing *Ingester) Tick(ctx context.Context) {
 	ts := time.Now().UnixMilli()
 	app := ing.store.Appender(ctx)
 	var appended, failed int
+	cur := make(map[uint64]labels.Labels, len(ing.prevSeries))
 	for _, fam := range fams {
 		for _, m := range fam.GetMetric() {
 			for _, smp := range Flatten(fam, m) {
@@ -143,14 +150,32 @@ func (ing *Ingester) Tick(ctx context.Context) {
 					lb.Add("quantile", smp.Quantile)
 				}
 				lb.Sort()
-				if _, err := app.Append(0, lb.Labels(), ts, smp.Value); err != nil {
+				l := lb.Labels()
+				if _, err := app.Append(0, l, ts, smp.Value); err != nil {
 					failed++
 					continue
 				}
+				cur[l.Hash()] = l
 				appended++
 			}
 		}
 	}
+	// Staleness markers (#191): a series that was appended last tick
+	// but is gone this tick (unregistered collector, evicted OBI
+	// series after pod churn) would otherwise stay frozen at its last
+	// value for the PromQL lookback window (~5m) — visible downstream
+	// as a live series that is actually dead. Appending an explicit
+	// StaleNaN makes it disappear from queries immediately, exactly as
+	// a real Prometheus scrape would on target churn.
+	for h, l := range ing.prevSeries {
+		if _, ok := cur[h]; ok {
+			continue
+		}
+		if _, err := app.Append(0, l, ts, math.Float64frombits(value.StaleNaN)); err != nil {
+			failed++
+		}
+	}
+	ing.prevSeries = cur
 	if err := app.Commit(); err != nil {
 		ing.logger.Warn("store ingest: commit failed", "err", err)
 		ing.appendErrors.Add(float64(appended + failed))
