@@ -15,6 +15,10 @@
 package e2e
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -52,7 +56,24 @@ func TestCaptureSmokeHTTP(t *testing.T) {
 	// terminates on the pod's loopback, which --scrape-auth exempts by
 	// design (#145), so no token is needed here; in-cluster scrapes
 	// still require one.
-	base := h.PortForward("ds/ollie-agent", "ollie-system", 19090, 9090)
+	//
+	// The cluster is multi-node (#194) and each agent only sees its
+	// own node's traffic, so forward the agent on the echo pod's node
+	// specifically — `ds/ollie-agent` picks an arbitrary pod and would
+	// coin-flip this test.
+	echoNode, err := h.KubectlOutput("get", "pod", "-n", "default", "-l", "app=echo",
+		"-o", "jsonpath={.items[0].spec.nodeName}")
+	if err != nil {
+		t.Fatalf("echo node: %v", err)
+	}
+	agentPod, err := h.KubectlOutput("get", "pod", "-n", "ollie-system",
+		"-l", "app.kubernetes.io/component=agent",
+		"--field-selector", "spec.nodeName="+strings.TrimSpace(echoNode),
+		"-o", "jsonpath={.items[0].metadata.name}")
+	if err != nil {
+		t.Fatalf("agent pod on %s: %v", echoNode, err)
+	}
+	base := h.PortForward("pod/"+strings.TrimSpace(agentPod), "ollie-system", 19090, 9090)
 
 	// Agent self-observability must be present immediately.
 	h.PollHTTP(base+"/metrics", 1*time.Minute, "agent self-obs metrics",
@@ -84,11 +105,11 @@ func TestCaptureSmokeHTTP(t *testing.T) {
 // discovers the agent through the headless Service, fans a PromQL
 // query out to the agent's remote-read endpoint, and returns
 // cluster-aggregated results over the Prometheus-compatible HTTP
-// API. Kind runs one node, so "cluster total" degenerates to one
-// agent's data — the multi-agent aggregation and degraded semantics
-// are covered by internal/fanout's in-process tests; this asserts
-// the deployed wiring (DNS discovery, token auth agent-side,
-// remote-read transport, API surface).
+// API. This asserts the deployed wiring end to end (DNS discovery,
+// token auth agent-side, remote-read transport, API surface); the
+// cross-node merge and degraded-on-agent-loss semantics on the real
+// multi-node topology are asserted by TestMultiNodeFanout and
+// TestDegradedOnAgentLoss.
 func TestQueryFanout(t *testing.T) {
 	if os.Getenv("RUN_E2E") == "" {
 		t.Skip("RUN_E2E not set, skipping e2e test")
@@ -407,4 +428,197 @@ func TestIobsctl(t *testing.T) {
 		func(out string) bool {
 			return strings.Contains(out, `"span"`) && strings.Contains(out, `"k8s.namespace.name":"default"`)
 		})
+}
+
+// TestMultiNodeFanout is the #194 gate: on the real multi-node cluster
+// the query server must fan out to every node's agent and merge their
+// series while keeping same-named series distinct per node. The v0.5
+// cross-node merge bug (ChainedSeriesMerge collapsing identical
+// series) shipped with green CI precisely because the old e2e cluster
+// was single-node, where this is unobservable. Each agent stamps its
+// own k8s_node_name (internal/store/ingest.go) onto ollie_agent_up, so
+// a correct merge yields exactly one series per node.
+func TestMultiNodeFanout(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, sharedClusterName)
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+
+	base := h.PortForward("deploy/ollie-query", "ollie-system", 19096, 9095)
+
+	// One ollie_agent_up series per node survives the fan-out merge: a
+	// merge that deduped across nodes would return 1.
+	h.PollHTTP(base+"/api/v1/query?query="+url.QueryEscape("count(ollie_agent_up)"),
+		2*time.Minute, "fan-out counts one ollie_agent_up per node",
+		func(body string) bool {
+			v, ok := vectorScalar(body)
+			return ok && v == float64(clusterNodes)
+		})
+
+	// The node label itself is distinct across the merged set — the
+	// direct assertion that per-node identity is preserved.
+	h.PollHTTP(base+"/api/v1/query?query="+url.QueryEscape("count(count by (k8s_node_name)(ollie_agent_up))"),
+		2*time.Minute, "ollie_agent_up carries a distinct k8s_node_name per node",
+		func(body string) bool {
+			v, ok := vectorScalar(body)
+			return ok && v == float64(clusterNodes)
+		})
+}
+
+// TestAuthBoundaries is the #195 gate for the two auth boundaries that
+// port-forward can never exercise (loopback is exempt by design, #145):
+// the query front-proxy's mTLS on :6443 and the agent scrape token on
+// :9090. Both are probed from a bare pod in the default namespace with
+// no ollie credentials.
+func TestAuthBoundaries(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, sharedClusterName)
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+	h.BuildProbeImage(repoRoot)
+
+	// The :6443 front-proxy requires a client cert chaining to the
+	// requestheader CA (RequireAndVerifyClientCert). A certless bare pod
+	// must be rejected at the TLS handshake — the auth bypass closed in
+	// v0.5.1 (#180). TCP must still connect, proving the rejection is
+	// TLS-level auth and not a network/NetworkPolicy drop (kindnetd does
+	// not enforce NetworkPolicy, so the packet does reach the listener).
+	out := h.RunProbe("probe-tls", "tcptls", "ollie-query.ollie-system.svc.cluster.local:6443")
+	if !strings.Contains(out, "TCP_OK") || !strings.Contains(out, "TLS_FAIL") {
+		t.Fatalf("expected TCP_OK + TLS_FAIL from :6443 (mTLS must reject a certless client); got: %s", out)
+	}
+
+	// The agent scrape surface on :9090 requires a bearer token for
+	// every non-loopback caller (#145). A tokenless in-cluster GET must
+	// be 401.
+	agentIP, err := h.KubectlOutput("get", "pod", "-n", "ollie-system",
+		"-l", "app.kubernetes.io/component=agent",
+		"-o", "jsonpath={.items[0].status.podIP}")
+	if err != nil {
+		t.Fatalf("agent pod IP: %v", err)
+	}
+	out = h.RunProbe("probe-scrape", "get",
+		fmt.Sprintf("http://%s:9090/metrics", strings.TrimSpace(agentIP)))
+	if !strings.Contains(out, "STATUS 401") {
+		t.Fatalf("expected STATUS 401 from tokenless :9090 scrape; got: %s", out)
+	}
+}
+
+// TestDegradedOnAgentLoss is the #195 gate for fan-out degradation on
+// the deployed topology: when a discovered agent stops answering, the
+// query API must surface degraded=true rather than silently returning a
+// partial result. Killing one agent leaves its endpoint in the query
+// server's resolved target set until the next discovery tick
+// (--resolve-interval, 15s); every fan-out in that window hits a dead
+// target and is marked degraded. The window is transient by design, so
+// this polls tight and asserts it is observed at least once.
+func TestDegradedOnAgentLoss(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, sharedClusterName)
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+
+	base := h.PortForward("deploy/ollie-query", "ollie-system", 19097, 9095)
+
+	// Baseline: both agents present and the query is not degraded.
+	h.PollHTTP(base+"/api/v1/query?query="+url.QueryEscape("count(ollie_agent_up)"),
+		2*time.Minute, "baseline: fan-out sees both agents, not degraded",
+		func(body string) bool {
+			v, ok := vectorScalar(body)
+			return ok && v == float64(clusterNodes) && !strings.Contains(body, `"degraded":true`)
+		})
+
+	// Restore the DaemonSet to full health before any later test in the
+	// shared cluster observes a missing agent, however this test exits.
+	t.Cleanup(func() {
+		h.Kubectl("rollout", "status", "daemonset/ollie-agent", "-n", "ollie-system", "--timeout=5m")
+	})
+
+	victim, err := h.KubectlOutput("get", "pod", "-n", "ollie-system",
+		"-l", "app.kubernetes.io/component=agent",
+		"-o", "jsonpath={.items[0].metadata.name}")
+	if err != nil {
+		t.Fatalf("victim agent pod: %v", err)
+	}
+	victim = strings.TrimSpace(victim)
+	h.Kubectl("delete", "pod", victim, "-n", "ollie-system", "--grace-period=1", "--wait=false")
+
+	deadline := time.Now().Add(30 * time.Second)
+	var last string
+	saw := false
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(base + "/api/v1/query?query=" + url.QueryEscape("count(ollie_agent_up)"))
+		if err == nil {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			last = string(b)
+			if strings.Contains(last, `"degraded":true`) {
+				saw = true
+				break
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !saw {
+		t.Fatalf("never observed degraded=true in the 30s after killing agent %s; last response: %s", victim, last)
+	}
+}
+
+// vectorScalar extracts the single sample value from a Prometheus
+// instant-vector query response (e.g. the result of count(...)). It
+// returns false unless the response is a success carrying exactly one
+// vector sample, so pollers can treat a not-yet-populated result as
+// "keep waiting" rather than a hard failure.
+func vectorScalar(body string) (float64, bool) {
+	var env struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Value [2]json.RawMessage `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		return 0, false
+	}
+	if env.Status != "success" || env.Data.ResultType != "vector" || len(env.Data.Result) != 1 {
+		return 0, false
+	}
+	var s string
+	if err := json.Unmarshal(env.Data.Result[0].Value[1], &s); err != nil {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
 }
