@@ -21,17 +21,24 @@
 // prefixed "PROBE:" and always exiting 0 so the pod reaches Succeeded
 // and its logs are retrievable regardless of the network outcome:
 //
-//	probe tcptls HOST:PORT
-//	    Dial TCP (proving the listener is reachable), then attempt a TLS
-//	    handshake presenting no client certificate. Prints
-//	    "PROBE: TCP_OK TLS_FAIL(<err>)" when the server rejects the
-//	    certless client. Used to prove the query front-proxy on :6443
-//	    still requires a client cert (RequireAndVerifyClientCert) — the
-//	    :6443 auth bypass closed in v0.5.1 (#180). Server-cert
-//	    verification is skipped on purpose so the ONLY thing that can
-//	    fail the handshake is the missing client cert; a TCP_OK next to
-//	    TLS_FAIL proves the rejection is TLS-level auth, not a network or
-//	    NetworkPolicy drop.
+//	probe mtls URL
+//	    Dial TCP to the URL's host:port (proving the listener is
+//	    reachable), then issue an HTTPS GET presenting NO client
+//	    certificate. Prints "PROBE: TCP_OK HTTPS_ERROR(<err>)" when the
+//	    server rejects the certless client at the TLS layer, or
+//	    "PROBE: TCP_OK HTTPS_STATUS <code> ..." when it answers at the
+//	    HTTP layer. Used to prove the query front-proxy on :6443 admits
+//	    only the aggregator (RequireAndVerifyClientCert against the
+//	    requestheader CA) — the :6443 auth bypass closed in v0.5.1
+//	    (#180). Server-cert verification is skipped on purpose so the
+//	    only thing that can reject the request is the missing/untrusted
+//	    CLIENT cert; a TCP_OK alongside the rejection proves it is
+//	    TLS/auth-level, not a network or NetworkPolicy drop.
+//
+//	    An HTTPS GET (not a bare handshake) is required because TLS 1.3
+//	    delivers the server's client-cert rejection as a post-handshake
+//	    alert: tls.Dial returns success and the rejection only surfaces
+//	    on the first read, i.e. when the HTTP round-trip runs.
 //
 //	probe get URL
 //	    Plain HTTP GET with no Authorization header. Prints
@@ -46,6 +53,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -53,12 +61,12 @@ import (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("PROBE: ERROR usage: probe <tcptls|get> <target>")
+		fmt.Println("PROBE: ERROR usage: probe <mtls|get> <target>")
 		return
 	}
 	switch os.Args[1] {
-	case "tcptls":
-		tcptls(os.Args[2])
+	case "mtls":
+		mtls(os.Args[2])
 	case "get":
 		get(os.Args[2])
 	default:
@@ -66,30 +74,42 @@ func main() {
 	}
 }
 
-// tcptls proves reachability at TCP then attempts a certless TLS
-// handshake, which an mTLS listener must reject.
-func tcptls(addr string) {
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+// mtls proves TCP reachability then issues a certless HTTPS GET, which
+// an mTLS listener must reject (at the TLS layer on read, TLS 1.3).
+func mtls(rawURL string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		fmt.Printf("PROBE: ERROR bad url %q: %v\n", rawURL, err)
+		return
+	}
+	host := u.Host
+	if u.Port() == "" {
+		host = net.JoinHostPort(u.Hostname(), "443")
+	}
+	conn, err := net.DialTimeout("tcp", host, 5*time.Second)
 	if err != nil {
 		fmt.Printf("PROBE: TCP_FAIL(%v)\n", err)
 		return
 	}
 	_ = conn.Close()
 
-	d := &net.Dialer{Timeout: 5 * time.Second}
 	// InsecureSkipVerify skips SERVER-cert verification only; it does
 	// not waive the server's requirement that the CLIENT present a cert.
-	// Skipping it isolates the failure to the missing client cert — the
-	// server cert is a self-signed serving cert this bare pod has no way
-	// to trust, and verifying it would fail the handshake for the wrong
-	// reason.
-	tconn, err := tls.DialWithDialer(d, "tcp", addr, &tls.Config{InsecureSkipVerify: true})
+	// Skipping it isolates the rejection to the missing client cert —
+	// the server cert is a self-signed serving cert this bare pod has no
+	// way to trust, and verifying it would fail for the wrong reason.
+	c := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	resp, err := c.Get(rawURL)
 	if err != nil {
-		fmt.Printf("PROBE: TCP_OK TLS_FAIL(%v)\n", err)
+		fmt.Printf("PROBE: TCP_OK HTTPS_ERROR(%v)\n", err)
 		return
 	}
-	_ = tconn.Close()
-	fmt.Println("PROBE: TCP_OK TLS_OK")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+	fmt.Printf("PROBE: TCP_OK HTTPS_STATUS %d BODY %q\n", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
 // get issues a tokenless plain-HTTP GET and reports the status code.

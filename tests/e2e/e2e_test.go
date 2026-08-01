@@ -497,13 +497,23 @@ func TestAuthBoundaries(t *testing.T) {
 
 	// The :6443 front-proxy requires a client cert chaining to the
 	// requestheader CA (RequireAndVerifyClientCert). A certless bare pod
-	// must be rejected at the TLS handshake — the auth bypass closed in
-	// v0.5.1 (#180). TCP must still connect, proving the rejection is
-	// TLS-level auth and not a network/NetworkPolicy drop (kindnetd does
-	// not enforce NetworkPolicy, so the packet does reach the listener).
-	out := h.RunProbe("probe-tls", "tcptls", "ollie-query.ollie-system.svc.cluster.local:6443")
-	if !strings.Contains(out, "TCP_OK") || !strings.Contains(out, "TLS_FAIL") {
-		t.Fatalf("expected TCP_OK + TLS_FAIL from :6443 (mTLS must reject a certless client); got: %s", out)
+	// must be rejected — the auth bypass closed in v0.5.1 (#180). The
+	// probe issues a full HTTPS round-trip, not a bare handshake: under
+	// TLS 1.3 the server delivers its client-cert rejection as a
+	// post-handshake alert, so the handshake itself reports success and
+	// the rejection only surfaces on the first read (the HTTP request).
+	// TCP must still connect, proving the rejection is TLS/auth-level and
+	// not a network/NetworkPolicy drop (kindnetd does not enforce
+	// NetworkPolicy, so the packet does reach the listener). A certless
+	// caller must never get 200; acceptable outcomes are a TLS-layer
+	// rejection (HTTPS_ERROR, "certificate required" on TLS 1.3) or, were
+	// the boundary ever moved to the HTTP layer, a 401/403.
+	out := h.RunProbe("probe-mtls", "mtls", "https://ollie-query.ollie-system.svc.cluster.local:6443/apis/custom.metrics.k8s.io/v1beta1")
+	rejected := strings.Contains(out, "HTTPS_ERROR") ||
+		strings.Contains(out, "HTTPS_STATUS 401") ||
+		strings.Contains(out, "HTTPS_STATUS 403")
+	if !strings.Contains(out, "TCP_OK") || !rejected || strings.Contains(out, "HTTPS_STATUS 200") {
+		t.Fatalf("expected TCP_OK + certless rejection (HTTPS_ERROR or 401/403, never 200) from :6443 mTLS; got: %s", out)
 	}
 
 	// The agent scrape surface on :9090 requires a bearer token for
