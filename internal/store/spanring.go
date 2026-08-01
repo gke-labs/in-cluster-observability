@@ -130,9 +130,29 @@ func (b *SpanBuffer) append(s StoredSpan) {
 		item := StreamItem{StoredSpan: s, Gap: sub.gap.Swap(0)}
 		select {
 		case sub.ch <- item:
+			continue
 		default:
-			// Slow consumer: restore the un-delivered gap and count
-			// this span against it.
+		}
+		// Slow consumer, channel full: evict the OLDEST queued
+		// delivery to make room for the new span (#187). A live tail
+		// must converge on the freshest spans — dropping the newest
+		// (the previous behavior) meant a stalled subscriber came
+		// back to a buffer of stale spans and never saw current
+		// traffic, the inverse of the drop-oldest contract in
+		// ADR-0026 §7 and stream/v1. The evicted delivery and its
+		// accumulated gap fold into this delivery's gap marker.
+		select {
+		case old := <-sub.ch:
+			item.Gap += old.Gap + 1
+			b.drops.WithLabelValues("spans", "slow_subscriber").Inc()
+		default:
+			// Consumer drained concurrently; there's room again.
+		}
+		select {
+		case sub.ch <- item:
+		default:
+			// Only reachable with a zero-capacity channel: restore
+			// the gap for the next attempt.
 			sub.gap.Add(item.Gap + 1)
 			b.drops.WithLabelValues("spans", "slow_subscriber").Inc()
 		}

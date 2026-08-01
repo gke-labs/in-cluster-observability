@@ -103,21 +103,25 @@ func TestSpanBufferSubscribe(t *testing.T) {
 		t.Fatalf("item = %+v", item)
 	}
 
-	// Overflow the 2-slot buffer without draining: extra spans drop
-	// and surface as Gap on the next delivery after draining.
+	// Overflow the 2-slot buffer without draining. Drop-OLDEST
+	// (#187, ADR-0026 §7): a stalled subscriber must converge on the
+	// freshest spans, so x1 and x2 are evicted to make room — the
+	// buffer ends holding x3 and x4, each carrying Gap=1 for the
+	// eviction that made its slot (gaps are per-delivery deltas).
 	b.AppendRequest(spanReq("ns", []string{"x1", "x2", "x3", "x4"}, now))
-	if got := (<-ch).Span.GetName(); got != "x1" {
-		t.Fatalf("first buffered = %s", got)
+	item = <-ch
+	if item.Span.GetName() != "x3" || item.Gap != 1 {
+		t.Fatalf("first buffered = %s gap %d, want x3/1 (x1 evicted)", item.Span.GetName(), item.Gap)
 	}
-	if got := (<-ch).Span.GetName(); got != "x2" {
-		t.Fatalf("second buffered = %s", got)
+	item = <-ch
+	if item.Span.GetName() != "x4" || item.Gap != 1 {
+		t.Fatalf("second buffered = %s gap %d, want x4/1 (x2 evicted)", item.Span.GetName(), item.Gap)
 	}
-	// x3, x4 were dropped (buffer full). The next append delivers
-	// with Gap=2.
+	// Fully drained: the next append arrives with no gap.
 	b.AppendRequest(spanReq("ns", []string{"after"}, now))
 	item = <-ch
-	if item.Span.GetName() != "after" || item.Gap != 2 {
-		t.Fatalf("post-gap item = name %s gap %d, want after/2", item.Span.GetName(), item.Gap)
+	if item.Span.GetName() != "after" || item.Gap != 0 {
+		t.Fatalf("post-drain item = name %s gap %d, want after/0", item.Span.GetName(), item.Gap)
 	}
 
 	// Cancel closes the channel and stops delivery.
