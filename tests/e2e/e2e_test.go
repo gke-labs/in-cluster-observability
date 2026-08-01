@@ -505,19 +505,22 @@ func TestCustomMetricsTLSVerification(t *testing.T) {
 
 	const apisvc = "v1beta1.custom.metrics.k8s.io"
 
-	// The controller minted a CA and wrote it into spec.caBundle.
-	h.PollKubectl(3*time.Minute, "custom-metrics APIService caBundle injected by self-managed CA",
+	// The controller committed the caBundle. Because the aggregation API
+	// forbids a caBundle alongside insecureSkipTLSVerify:true, the bundle
+	// only appears at the same instant the flag is cleared — this is the
+	// gated atomic commit. It fires only after kubelet has remounted the
+	// optional serving Secret into the query pods (a short delay after the
+	// controller creates it) and the flip gate has probed every endpoint,
+	// so allow a few resync passes.
+	h.PollKubectl(5*time.Minute, "custom-metrics APIService caBundle injected by self-managed CA",
 		func() (string, error) {
 			return h.KubectlOutput("get", "apiservice", apisvc, "-o", `jsonpath={.spec.caBundle}`)
 		},
 		func(out string) bool { return len(strings.TrimSpace(out)) > 0 })
 
-	// The flip gate cleared: every ready query endpoint serves the CA
-	// cert, so the controller dropped insecureSkipTLSVerify. Kubelet
-	// remounts the optional serving Secret and the query reloads it a
-	// short while after the controller creates it, so this can take a
-	// couple of resync passes.
-	h.PollKubectl(4*time.Minute, "custom-metrics APIService insecureSkipTLSVerify dropped",
+	// The same atomic commit cleared insecureSkipTLSVerify; verify it
+	// landed (should already be true the moment the caBundle appeared).
+	h.PollKubectl(2*time.Minute, "custom-metrics APIService insecureSkipTLSVerify dropped",
 		func() (string, error) {
 			return h.KubectlOutput("get", "apiservice", apisvc, "-o", `jsonpath={.spec.insecureSkipTLSVerify}`)
 		},

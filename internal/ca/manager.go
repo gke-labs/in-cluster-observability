@@ -37,13 +37,15 @@ import (
 //  1. ensure the CA Secret exists (create once; never auto-rotated here);
 //  2. ensure the query serving-cert Secret is present, issued by the CA,
 //     and covers the wanted SANs (re-issue on drift or near-expiry);
-//  3. write the CA into APIService.spec.caBundle (unconditional — safe
-//     while insecureSkipTLSVerify is still true);
-//  4. gated flip: drop insecureSkipTLSVerify only once EVERY ready
-//     ollie-query endpoint presents a leaf that chains to the current
-//     CA. This is the HPA-takedown guard: flipping while any replica
-//     still serves the old self-signed cert would make the aggregator
-//     reject the backend and mark the APIService Unavailable.
+//  3. gated commit: the aggregation API rejects a caBundle that coexists
+//     with insecureSkipTLSVerify=true, so both fields move together in a
+//     single atomic patch. We keep the shipped bootstrap posture
+//     (insecureSkipTLSVerify=true, empty caBundle — which never breaks
+//     HPAs) until EVERY ready ollie-query endpoint presents a leaf that
+//     chains to the current CA, then write the caBundle and clear the
+//     flag at once. This is the HPA-takedown guard: committing while any
+//     replica still serves the old self-signed cert would make the
+//     aggregator reject the backend and mark the APIService Unavailable.
 type Manager struct {
 	Clientset kubernetes.Interface
 	APISvc    APIServiceStore
@@ -75,12 +77,12 @@ type Manager struct {
 type APIServiceStore interface {
 	// Get returns the current caBundle and insecureSkipTLSVerify.
 	Get(ctx context.Context) (caBundle []byte, insecure bool, err error)
-	// SetCABundle writes spec.caBundle. Safe to call while
-	// insecureSkipTLSVerify is true.
-	SetCABundle(ctx context.Context, caPEM []byte) error
-	// DisableInsecureSkipVerify sets insecureSkipTLSVerify=false. The
-	// caller guarantees caBundle is already populated and valid.
-	DisableInsecureSkipVerify(ctx context.Context) error
+	// Commit atomically sets spec.caBundle=caPEM and
+	// spec.insecureSkipTLSVerify=false in a single patch. The aggregation
+	// API rejects a non-empty caBundle alongside insecureSkipTLSVerify=true,
+	// so the two fields must transition together. The caller guarantees
+	// every serving endpoint already presents a caPEM-signed leaf.
+	Commit(ctx context.Context, caPEM []byte) error
 }
 
 func (m *Manager) clock() time.Time {
@@ -107,11 +109,8 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	if err := m.ensureServingCert(ctx, authority); err != nil {
 		return fmt.Errorf("ensure serving cert: %w", err)
 	}
-	if err := m.ensureCABundle(ctx, authority); err != nil {
-		return fmt.Errorf("ensure caBundle: %w", err)
-	}
-	if err := m.maybeFlip(ctx, authority); err != nil {
-		return fmt.Errorf("flip insecureSkipTLSVerify: %w", err)
+	if err := m.reconcileAPIService(ctx, authority); err != nil {
+		return fmt.Errorf("reconcile APIService: %w", err)
 	}
 	return nil
 }
@@ -232,59 +231,48 @@ func (m *Manager) ensureServingCert(ctx context.Context, authority *CA) error {
 	return nil
 }
 
-// ensureCABundle writes the CA into the APIService caBundle if it differs.
-// Unconditional: this is always safe while insecureSkipTLSVerify is true,
-// and is a prerequisite for the flip.
-func (m *Manager) ensureCABundle(ctx context.Context, authority *CA) error {
-	cur, _, err := m.APISvc.Get(ctx)
+// reconcileAPIService drives the APIService to the verified-TLS target
+// state (caBundle=CA, insecureSkipTLSVerify=false) in a single atomic
+// patch, but only once every ready query endpoint serves a CA-signed
+// leaf. The aggregation API forbids a non-empty caBundle while
+// insecureSkipTLSVerify is true, so the two cannot be split across
+// passes: until the gate opens we leave the shipped bootstrap posture
+// (skip-verify on, empty caBundle) untouched — that never breaks an HPA.
+// If any endpoint fails the check (or none are ready yet), it leaves the
+// APIService as-is and retries next pass.
+func (m *Manager) reconcileAPIService(ctx context.Context, authority *CA) error {
+	curBundle, insecure, err := m.APISvc.Get(ctx)
 	if err != nil {
 		return err
 	}
-	if string(cur) == string(authority.CertPEM()) {
-		return nil
-	}
-	if err := m.APISvc.SetCABundle(ctx, authority.CertPEM()); err != nil {
-		return err
-	}
-	m.log().Info("wrote APIService caBundle from self-managed CA")
-	return nil
-}
-
-// maybeFlip drops insecureSkipTLSVerify once every ready query endpoint
-// serves a CA-signed leaf. If any endpoint fails the check (or none are
-// ready yet), it leaves the flag as-is and will retry next pass.
-func (m *Manager) maybeFlip(ctx context.Context, authority *CA) error {
-	_, insecure, err := m.APISvc.Get(ctx)
-	if err != nil {
-		return err
-	}
-	if !insecure {
-		return nil // already flipped
+	desired := authority.CertPEM()
+	if !insecure && string(curBundle) == string(desired) {
+		return nil // already in the verified-TLS target state
 	}
 	addrs, err := m.readyEndpoints(ctx)
 	if err != nil {
 		return err
 	}
 	if len(addrs) == 0 {
-		m.log().Info("flip gate: no ready query endpoints yet; leaving insecureSkipTLSVerify=true")
+		m.log().Info("apiservice gate: no ready query endpoints yet; leaving bootstrap TLS posture")
 		return nil
 	}
 	now := m.clock()
 	for _, addr := range addrs {
 		leaf, pErr := m.probe(ctx, addr)
 		if pErr != nil {
-			m.log().Info("flip gate: endpoint not ready for TLS verification", "addr", addr, "err", pErr)
+			m.log().Info("apiservice gate: endpoint not ready for TLS verification", "addr", addr, "err", pErr)
 			return nil
 		}
-		if vErr := VerifyServedBy(leaf, authority.CertPEM(), "", now); vErr != nil {
-			m.log().Info("flip gate: endpoint still serving a non-CA cert", "addr", addr, "err", vErr)
+		if vErr := VerifyServedBy(leaf, desired, "", now); vErr != nil {
+			m.log().Info("apiservice gate: endpoint still serving a non-CA cert", "addr", addr, "err", vErr)
 			return nil
 		}
 	}
-	if err := m.APISvc.DisableInsecureSkipVerify(ctx); err != nil {
+	if err := m.APISvc.Commit(ctx, desired); err != nil {
 		return err
 	}
-	m.log().Info("all query endpoints serve the self-managed CA; dropped insecureSkipTLSVerify", "endpoints", len(addrs))
+	m.log().Info("all query endpoints serve the self-managed CA; committed caBundle and enabled TLS verification", "endpoints", len(addrs))
 	return nil
 }
 

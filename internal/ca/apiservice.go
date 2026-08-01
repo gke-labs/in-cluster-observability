@@ -65,18 +65,13 @@ func (s *dynamicAPIServiceStore) Get(ctx context.Context) (caBundle []byte, inse
 	return caBundle, insecure, nil
 }
 
-func (s *dynamicAPIServiceStore) SetCABundle(ctx context.Context, caPEM []byte) error {
+func (s *dynamicAPIServiceStore) Commit(ctx context.Context, caPEM []byte) error {
+	// caBundle and insecureSkipTLSVerify:false must land in the same patch:
+	// the API server rejects a non-empty caBundle while skip-verify is true,
+	// so a two-step (set bundle, then clear flag) is not representable.
 	patch := map[string]any{
 		"spec": map[string]any{
-			"caBundle": base64.StdEncoding.EncodeToString(caPEM),
-		},
-	}
-	return s.patch(ctx, patch)
-}
-
-func (s *dynamicAPIServiceStore) DisableInsecureSkipVerify(ctx context.Context) error {
-	patch := map[string]any{
-		"spec": map[string]any{
+			"caBundle":              base64.StdEncoding.EncodeToString(caPEM),
 			"insecureSkipTLSVerify": false,
 		},
 	}

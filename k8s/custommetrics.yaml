@@ -18,13 +18,16 @@
 # TLS posture per ADR-0028 (#196): the ollie-controller runs a self-
 # managed CA (no cert-manager dependency). On the elected leader it
 # mints a CA, issues ollie-query's serving cert (mounted from the
-# ollie-query-serving Secret), writes the CA into spec.caBundle below,
-# and then drops insecureSkipTLSVerify once every query endpoint is
-# confirmed to serve the CA-signed cert. This manifest ships
-# insecureSkipTLSVerify:true as the safe bootstrap default: a fresh
-# `kubectl apply -k` is never broken before the controller runs, and
-# the flip is self-healing. Do not remove it here — the controller owns
-# the transition.
+# ollie-query-serving Secret), and then — once every query endpoint is
+# confirmed to serve the CA-signed cert — sets spec.caBundle and clears
+# insecureSkipTLSVerify in a single atomic patch. The API server rejects
+# a caBundle that coexists with insecureSkipTLSVerify:true, so the two
+# must move together; there is no valid half-applied state. This manifest
+# ships insecureSkipTLSVerify:true with NO caBundle as the safe bootstrap
+# default: a fresh `kubectl apply -k` is never broken before the
+# controller runs, and the transition is self-healing. Do not set a
+# caBundle or remove insecureSkipTLSVerify here — the controller owns
+# the atomic transition.
 #
 # CLIENT auth is not deferred: ollie-query requires the aggregation
 # layer's front-proxy (requestheader) client certificate on :6443

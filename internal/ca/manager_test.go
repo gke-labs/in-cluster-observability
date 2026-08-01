@@ -24,25 +24,22 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-// fakeAPIService is an in-memory APIServiceStore.
+// fakeAPIService is an in-memory APIServiceStore. It mirrors the real
+// aggregation-API invariant: a non-empty caBundle may not coexist with
+// insecureSkipTLSVerify=true, so the only mutation is the atomic Commit.
 type fakeAPIService struct {
-	caBundle  []byte
-	insecure  bool
-	setCalls  int
-	flipCalls int
+	caBundle    []byte
+	insecure    bool
+	commitCalls int
 }
 
 func (f *fakeAPIService) Get(context.Context) ([]byte, bool, error) {
 	return f.caBundle, f.insecure, nil
 }
-func (f *fakeAPIService) SetCABundle(_ context.Context, ca []byte) error {
+func (f *fakeAPIService) Commit(_ context.Context, ca []byte) error {
 	f.caBundle = ca
-	f.setCalls++
-	return nil
-}
-func (f *fakeAPIService) DisableInsecureSkipVerify(context.Context) error {
 	f.insecure = false
-	f.flipCalls++
+	f.commitCalls++
 	return nil
 }
 
@@ -182,31 +179,10 @@ func TestEnsureServingCertReissuesNearExpiry(t *testing.T) {
 	}
 }
 
-func TestEnsureCABundle(t *testing.T) {
-	m, _, api := newManager(t)
-	ctx := context.Background()
-	authority, _ := m.ensureCA(ctx)
-
-	if err := m.ensureCABundle(ctx, authority); err != nil {
-		t.Fatalf("ensureCABundle: %v", err)
-	}
-	if string(api.caBundle) != string(authority.CertPEM()) {
-		t.Error("caBundle not set to CA cert")
-	}
-	// Idempotent: no second write when unchanged.
-	if err := m.ensureCABundle(ctx, authority); err != nil {
-		t.Fatalf("ensureCABundle (noop): %v", err)
-	}
-	if api.setCalls != 1 {
-		t.Errorf("caBundle written %d times, want 1", api.setCalls)
-	}
-}
-
-func TestMaybeFlipGate(t *testing.T) {
+func TestReconcileAPIServiceGate(t *testing.T) {
 	m, cs, api := newManager(t)
 	ctx := context.Background()
 	authority, _ := m.ensureCA(ctx)
-	_ = m.ensureCABundle(ctx, authority)
 
 	// Leaf served by the CA, and a leaf from a foreign CA.
 	goodPEM, _, _ := authority.IssueServingCert(testDNS, time.Now(), ServingDefaultLifetime)
@@ -215,12 +191,12 @@ func TestMaybeFlipGate(t *testing.T) {
 	badPEM, _, _ := foreign.IssueServingCert(testDNS, time.Now(), ServingDefaultLifetime)
 	badDER, _ := decodePEM(badPEM, "CERTIFICATE")
 
-	// No endpoints yet: no flip.
-	if err := m.maybeFlip(ctx, authority); err != nil {
-		t.Fatalf("maybeFlip (no endpoints): %v", err)
+	// No endpoints yet: no commit — bootstrap posture untouched.
+	if err := m.reconcileAPIService(ctx, authority); err != nil {
+		t.Fatalf("reconcileAPIService (no endpoints): %v", err)
 	}
-	if !api.insecure {
-		t.Fatal("flipped with zero ready endpoints")
+	if !api.insecure || len(api.caBundle) != 0 {
+		t.Fatal("committed with zero ready endpoints (must keep skip-verify on, empty caBundle)")
 	}
 
 	// Two endpoints, one still serving a foreign (old self-signed) cert.
@@ -230,29 +206,35 @@ func TestMaybeFlipGate(t *testing.T) {
 		"10.0.0.2:6443": badDER,
 	}
 	m.probeLeaf = func(_ context.Context, addr string) ([]byte, error) { return served[addr], nil }
-	if err := m.maybeFlip(ctx, authority); err != nil {
-		t.Fatalf("maybeFlip (mixed): %v", err)
+	if err := m.reconcileAPIService(ctx, authority); err != nil {
+		t.Fatalf("reconcileAPIService (mixed): %v", err)
 	}
-	if !api.insecure {
-		t.Fatal("flipped while an endpoint still served a non-CA cert (HPA takedown risk)")
+	if !api.insecure || len(api.caBundle) != 0 {
+		t.Fatal("committed while an endpoint still served a non-CA cert (HPA takedown risk)")
 	}
 
-	// Both now serve the CA cert: flip proceeds.
+	// Both now serve the CA cert: commit proceeds atomically.
 	served["10.0.0.2:6443"] = goodDER
-	if err := m.maybeFlip(ctx, authority); err != nil {
-		t.Fatalf("maybeFlip (all good): %v", err)
+	if err := m.reconcileAPIService(ctx, authority); err != nil {
+		t.Fatalf("reconcileAPIService (all good): %v", err)
 	}
 	if api.insecure {
-		t.Fatal("did not flip once all endpoints served the CA cert")
+		t.Fatal("did not clear insecureSkipTLSVerify once all endpoints served the CA cert")
 	}
-	if api.flipCalls != 1 {
-		t.Errorf("flip called %d times, want 1", api.flipCalls)
+	if string(api.caBundle) != string(authority.CertPEM()) {
+		t.Fatal("caBundle not set to the CA cert on commit")
+	}
+	if api.commitCalls != 1 {
+		t.Errorf("commit called %d times, want 1", api.commitCalls)
 	}
 
-	// Already flipped: no-op (and no probing needed).
-	m.probeLeaf = func(_ context.Context, _ string) ([]byte, error) { t.Fatal("probed after flip"); return nil, nil }
-	if err := m.maybeFlip(ctx, authority); err != nil {
-		t.Fatalf("maybeFlip (post-flip): %v", err)
+	// Already committed and current: no-op (and no probing needed).
+	m.probeLeaf = func(_ context.Context, _ string) ([]byte, error) { t.Fatal("probed after commit"); return nil, nil }
+	if err := m.reconcileAPIService(ctx, authority); err != nil {
+		t.Fatalf("reconcileAPIService (post-commit): %v", err)
+	}
+	if api.commitCalls != 1 {
+		t.Errorf("commit called %d times after steady state, want 1", api.commitCalls)
 	}
 }
 
