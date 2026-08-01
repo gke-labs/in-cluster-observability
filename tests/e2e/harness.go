@@ -275,31 +275,44 @@ func (h *Harness) BuildProbeImage(repoRoot string) {
 	probeState.failed = ""
 }
 
-// RunProbe runs the probe image as a one-off pod in the default
-// namespace — an untrusted, non-ollie ServiceAccount — with the given
-// probe args, waits for it to finish, and returns its stdout. The pod is
-// deleted on cleanup. BuildProbeImage must have run first.
-func (h *Harness) RunProbe(podName string, args ...string) string {
+// EnsureNamespace creates the namespace if it does not already exist.
+// The API server stamps every namespace with the immutable
+// kubernetes.io/metadata.name label, so a namespace named to match a
+// NetworkPolicy's namespaceSelector is admitted by that policy — this
+// is how the scrape probe lands on the agent's permitted-scraper side.
+func (h *Harness) EnsureNamespace(name string) {
 	h.t.Helper()
-	_, _ = h.KubectlOutput("delete", "pod", podName, "-n", "default", "--ignore-not-found", "--now")
-	runArgs := []string{"run", podName, "-n", "default",
+	if _, err := h.KubectlOutput("get", "namespace", name); err == nil {
+		return
+	}
+	h.Kubectl("create", "namespace", name)
+}
+
+// RunProbe runs the probe image as a one-off pod in the given namespace
+// with an untrusted, non-ollie ServiceAccount, passing the probe args,
+// waits for it to finish, and returns its stdout. The pod is deleted on
+// cleanup. BuildProbeImage must have run first.
+func (h *Harness) RunProbe(namespace, podName string, args ...string) string {
+	h.t.Helper()
+	_, _ = h.KubectlOutput("delete", "pod", podName, "-n", namespace, "--ignore-not-found", "--now")
+	runArgs := []string{"run", podName, "-n", namespace,
 		"--image=" + probeImage, "--image-pull-policy=Never",
 		"--restart=Never", "--command", "--", "/probe"}
 	runArgs = append(runArgs, args...)
 	h.Kubectl(runArgs...)
 	h.t.Cleanup(func() {
-		_, _ = h.KubectlOutput("delete", "pod", podName, "-n", "default", "--ignore-not-found", "--now")
+		_, _ = h.KubectlOutput("delete", "pod", podName, "-n", namespace, "--ignore-not-found", "--now")
 	})
 	h.PollKubectl(2*time.Minute, "probe pod "+podName+" reaches a terminal phase",
 		func() (string, error) {
-			return h.KubectlOutput("get", "pod", podName, "-n", "default",
+			return h.KubectlOutput("get", "pod", podName, "-n", namespace,
 				"-o", "jsonpath={.status.phase}")
 		},
 		func(out string) bool {
 			p := strings.TrimSpace(out)
 			return p == "Succeeded" || p == "Failed"
 		})
-	out, err := h.KubectlOutput("logs", podName, "-n", "default")
+	out, err := h.KubectlOutput("logs", podName, "-n", namespace)
 	if err != nil {
 		h.t.Fatalf("probe %s logs: %v", podName, err)
 	}

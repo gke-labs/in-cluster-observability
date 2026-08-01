@@ -45,9 +45,11 @@
 #
 # Caveats:
 #   - Enforcement requires a policy-capable CNI (GKE Dataplane V2:
-#     yes; Kind's default kindnetd: no — the smoke-test flow is
-#     unaffected). Network position is defense in depth, not
-#     identity; bearer-token auth on the endpoint is #145.
+#     yes; Kind's kindnetd: yes on the late-2024+ node images, which
+#     embed a kube-network-policies nftables controller — older
+#     kindnetd silently ignored these policies). Network position is
+#     defense in depth, not identity; bearer-token auth on the
+#     endpoint is #145.
 #   - Loopback traffic (OBI -> agent OTLP on 127.0.0.1) is intra-pod
 #     and never subject to NetworkPolicy.
 #

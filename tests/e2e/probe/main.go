@@ -43,8 +43,17 @@
 //	probe get URL
 //	    Plain HTTP GET with no Authorization header. Prints
 //	    "PROBE: STATUS <code> ...". Used to prove the agent scrape
-//	    surface on :9090 returns 401 to a tokenless in-cluster caller
-//	    (#145).
+//	    surface on :9090 returns 401 to a tokenless caller that is
+//	    network-permitted to reach it (#145).
+//
+//	probe tcp HOST:PORT
+//	    Attempt a bare TCP connection with a short timeout. Prints
+//	    "PROBE: TCP_OK" or "PROBE: TCP_FAIL(<err>)". Used to prove the
+//	    agent scrape port :9090 is NetworkPolicy-DROPPED for a pod
+//	    outside the permitted scraper namespace (#143): a dropped SYN
+//	    never completes the handshake, so the dial times out. kindnet
+//	    (KIND's default CNI) enforces NetworkPolicy via nftables on the
+//	    node-image versions this suite runs.
 package main
 
 import (
@@ -61,7 +70,7 @@ import (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("PROBE: ERROR usage: probe <mtls|get> <target>")
+		fmt.Println("PROBE: ERROR usage: probe <mtls|get|tcp> <target>")
 		return
 	}
 	switch os.Args[1] {
@@ -69,9 +78,25 @@ func main() {
 		mtls(os.Args[2])
 	case "get":
 		get(os.Args[2])
+	case "tcp":
+		tcp(os.Args[2])
 	default:
 		fmt.Printf("PROBE: ERROR unknown subcommand %q\n", os.Args[1])
 	}
+}
+
+// tcp attempts a bare TCP connection and reports reachability. A
+// NetworkPolicy DROP shows up as a dial timeout (the SYN is silently
+// discarded), distinguishing a network-layer block from an HTTP-layer
+// rejection.
+func tcp(addr string) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		fmt.Printf("PROBE: TCP_FAIL(%v)\n", err)
+		return
+	}
+	_ = conn.Close()
+	fmt.Println("PROBE: TCP_OK")
 }
 
 // mtls proves TCP reachability then issues a certless HTTPS GET, which

@@ -495,20 +495,20 @@ func TestAuthBoundaries(t *testing.T) {
 	h.InstallOllie(repoRoot)
 	h.BuildProbeImage(repoRoot)
 
-	// The :6443 front-proxy requires a client cert chaining to the
-	// requestheader CA (RequireAndVerifyClientCert). A certless bare pod
-	// must be rejected — the auth bypass closed in v0.5.1 (#180). The
-	// probe issues a full HTTPS round-trip, not a bare handshake: under
-	// TLS 1.3 the server delivers its client-cert rejection as a
+	// Boundary 1 — the :6443 front-proxy requires a client cert chaining
+	// to the requestheader CA (RequireAndVerifyClientCert). A certless
+	// bare pod must be rejected — the auth bypass closed in v0.5.1 (#180).
+	// The probe issues a full HTTPS round-trip, not a bare handshake:
+	// under TLS 1.3 the server delivers its client-cert rejection as a
 	// post-handshake alert, so the handshake itself reports success and
 	// the rejection only surfaces on the first read (the HTTP request).
-	// TCP must still connect, proving the rejection is TLS/auth-level and
-	// not a network/NetworkPolicy drop (kindnetd does not enforce
-	// NetworkPolicy, so the packet does reach the listener). A certless
+	// TCP must connect (ollie-query-ingress opens :6443 to any source, so
+	// the aggregator can reach it — identity is the cert, not the network
+	// position), proving the rejection is TLS/auth-level. A certless
 	// caller must never get 200; acceptable outcomes are a TLS-layer
 	// rejection (HTTPS_ERROR, "certificate required" on TLS 1.3) or, were
 	// the boundary ever moved to the HTTP layer, a 401/403.
-	out := h.RunProbe("probe-mtls", "mtls", "https://ollie-query.ollie-system.svc.cluster.local:6443/apis/custom.metrics.k8s.io/v1beta1")
+	out := h.RunProbe("default", "probe-mtls", "mtls", "https://ollie-query.ollie-system.svc.cluster.local:6443/apis/custom.metrics.k8s.io/v1beta1")
 	rejected := strings.Contains(out, "HTTPS_ERROR") ||
 		strings.Contains(out, "HTTPS_STATUS 401") ||
 		strings.Contains(out, "HTTPS_STATUS 403")
@@ -516,19 +516,42 @@ func TestAuthBoundaries(t *testing.T) {
 		t.Fatalf("expected TCP_OK + certless rejection (HTTPS_ERROR or 401/403, never 200) from :6443 mTLS; got: %s", out)
 	}
 
-	// The agent scrape surface on :9090 requires a bearer token for
-	// every non-loopback caller (#145). A tokenless in-cluster GET must
-	// be 401.
 	agentIP, err := h.KubectlOutput("get", "pod", "-n", "ollie-system",
 		"-l", "app.kubernetes.io/component=agent",
 		"-o", "jsonpath={.items[0].status.podIP}")
 	if err != nil {
 		t.Fatalf("agent pod IP: %v", err)
 	}
-	out = h.RunProbe("probe-scrape", "get",
-		fmt.Sprintf("http://%s:9090/metrics", strings.TrimSpace(agentIP)))
+	agentIP = strings.TrimSpace(agentIP)
+
+	// Boundary 2a — NetworkPolicy (#143). The agent scrape port :9090
+	// carries cross-namespace k8s.* identity and traffic volumes;
+	// ollie-agent-ingress pins its ingress to the scraper namespace
+	// (gmp-system by default) via the immutable kubernetes.io/metadata.name
+	// label. A pod in an unrelated namespace (default) must be DROPPED at
+	// the network layer — the SYN is discarded, so a bare TCP dial times
+	// out rather than connecting. kindnet (KIND's default CNI) enforces
+	// NetworkPolicy via nftables on the node images this suite runs, so
+	// this is a live assertion, not a no-op. A TCP_OK here would mean the
+	// policy is not being enforced.
+	out = h.RunProbe("default", "probe-np", "tcp",
+		fmt.Sprintf("%s:9090", agentIP))
+	if !strings.Contains(out, "TCP_FAIL") {
+		t.Fatalf("expected TCP_FAIL to :9090 from an unpermitted namespace (NetworkPolicy #143 must drop it); got: %s", out)
+	}
+
+	// Boundary 2b — bearer token (#145). From the permitted scraper
+	// namespace the packet reaches the listener, so the token layer is
+	// what stands between an unauthenticated caller and the metrics: a
+	// tokenless GET must be 401. This isolates the token check from the
+	// network check above — without the permitted namespace the request
+	// would be dropped before auth ever ran (which is exactly what bit an
+	// earlier version of this test).
+	h.EnsureNamespace("gmp-system")
+	out = h.RunProbe("gmp-system", "probe-scrape", "get",
+		fmt.Sprintf("http://%s:9090/metrics", agentIP))
 	if !strings.Contains(out, "STATUS 401") {
-		t.Fatalf("expected STATUS 401 from tokenless :9090 scrape; got: %s", out)
+		t.Fatalf("expected STATUS 401 from tokenless :9090 scrape in the permitted namespace; got: %s", out)
 	}
 }
 
