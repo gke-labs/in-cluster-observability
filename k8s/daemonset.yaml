@@ -230,12 +230,20 @@ spec:
               protocol: TCP
           # tcpSocket rather than httpGet (#155): /metrics requires a
           # bearer token in-cluster (--scrape-auth, #145) and kubelet
-          # probes don't carry one. A TCP connect verifies the scrape
-          # listener is up without weakening auth; a wedged listener
-          # was previously invisible.
+          # probes don't carry one. A TCP connect verifies the listener
+          # is up without weakening auth; a wedged listener was
+          # previously invisible.
+          #
+          # Readiness gates on :9091 (remote read), not :9090 (#192):
+          # the scrape listener comes up before the tsdb finishes WAL
+          # replay, so a :9090 probe let a restarting agent join the
+          # query fan-out early and every rolling update produced a
+          # transient degraded window. The remote-read listener only
+          # binds after tsdb open, making it the true "ready to serve
+          # queries" signal; scrape rides along (same process).
           readinessProbe:
             tcpSocket:
-              port: scrape
+              port: remote-read
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
@@ -250,7 +258,11 @@ spec:
               memory: 100Mi
             limits:
               cpu: 300m
-              memory: 200Mi
+              # 400Mi per the sizing doc (#189): the v0.5 tsdb head +
+              # 64Ki-entry span ring outgrew the pre-v0.5 200Mi; that
+              # limit risked OOMKill under real L7 load. Revisit when
+              # HTTP/2/gRPC capture (v0.6 phase 3) raises event rates.
+              memory: 400Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
