@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -375,7 +376,21 @@ func TestIobsctl(t *testing.T) {
 			return string(out), err
 		},
 		func(out string) bool {
-			return strings.Contains(out, "METRIC") && strings.Contains(out, "VALUE")
+			// #188: the header prints even for an empty result, so
+			// requiring it alone was false-green. Demand a data row
+			// whose value column is a number >= 1 (each node's
+			// ollie_agent_up contributes 1 to the sum).
+			if !strings.Contains(out, "METRIC") {
+				return false
+			}
+			for _, line := range strings.Split(out, "\n")[1:] {
+				for _, f := range strings.Fields(line) {
+					if v, err := strconv.ParseFloat(f, 64); err == nil && v >= 1 {
+						return true
+					}
+				}
+			}
+			return false
 		})
 
 	// Live CEL span stream: the echo workload produces HTTP server
