@@ -57,6 +57,7 @@ func (s *AgentServer) SubscribeSpans(req *streamv1.SubscribeSpansRequest, srv st
 	// No: gap means "lost to backpressure", not "didn't match" —
 	// carry drop-gaps across non-matching spans instead.
 	var carriedGap uint64
+	var celErrs uint64
 	for {
 		select {
 		case <-ctx.Done():
@@ -67,9 +68,24 @@ func (s *AgentServer) SubscribeSpans(req *streamv1.SubscribeSpansRequest, srv st
 			}
 			match, err := filter(item.Span, item.Resource)
 			if err != nil {
-				// A filter that errors on a real span is a client
-				// bug; surface it rather than silently dropping.
-				return status.Errorf(codes.InvalidArgument, "cel evaluation: %v", err)
+				// A per-span evaluation error must not tear down the
+				// stream (#186): CEL errors are data-dependent — the
+				// documented example filter
+				// resource["k8s.namespace.name"] == "shop" throws
+				// "no such key" on any span lacking the attribute, so
+				// one unrelated span would kill a healthy
+				// subscription (and, through the query-server mux,
+				// silently drop this node). Treat the span as
+				// non-matching; log the first occurrence per stream
+				// so a filter that errors on everything is
+				// diagnosable.
+				if celErrs == 0 {
+					logger.Warn("stream: cel filter errored on a span; treating as non-match (logged once per stream)",
+						"err", err, "filter", req.GetCelFilter())
+				}
+				celErrs++
+				carriedGap += item.Gap
+				continue
 			}
 			if !match {
 				carriedGap += item.Gap
