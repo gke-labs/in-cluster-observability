@@ -44,6 +44,26 @@ func readConfigSettling(t *testing.T, path, want string, deadline time.Duration)
 	return last
 }
 
+// readConfigGoneSettling polls the OBI config file until the given
+// substring disappears or the deadline elapses. Counterpart of
+// readConfigSettling for waiting on debounced removals.
+func readConfigGoneSettling(t *testing.T, path, gone string, deadline time.Duration) string {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	var last string
+	for time.Now().Before(end) {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			last = string(b)
+			if !strings.Contains(last, gone) {
+				return last
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return last
+}
+
 func TestAllowPID_WritesDiscoveryService(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "obi.yaml")
@@ -89,17 +109,13 @@ func TestBlockPID_RemovesDiscoveryService(t *testing.T) {
 	_ = mgr.AllowPID(12345, capture.PIDSpec{})
 	_ = readConfigSettling(t, path, "pid-12345", 3*time.Second)
 	_ = mgr.BlockPID(12345)
-	content := readConfigSettling(t, path, "", 3*time.Second)
-	// After BlockPID + debounce, the discovery section should no longer
-	// list pid-12345.
-	// Wait one more debounce cycle to be sure.
-	time.Sleep(700 * time.Millisecond)
-	content2, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read final: %v", err)
-	}
-	if strings.Contains(string(content2), "pid-12345") {
-		t.Errorf("BlockPID should remove discovery service; got:\n%s\n(previously: %s)", string(content2), content)
+	// The removal lands asynchronously after the debounce window, so
+	// poll for the entry to disappear rather than sleeping a fixed
+	// interval (a 700ms sleep vs the 500ms debounce flaked on slow
+	// CI runners).
+	content := readConfigGoneSettling(t, path, "pid-12345", 3*time.Second)
+	if strings.Contains(content, "pid-12345") {
+		t.Errorf("BlockPID should remove discovery service; got:\n%s", content)
 	}
 }
 
