@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -51,19 +52,25 @@ func NewHarness(t *testing.T, clusterName string) *Harness {
 	h := &Harness{t: t, ClusterName: clusterName}
 
 	out, err := exec.Command("kind", "get", "clusters").Output()
-	if err == nil && containsLine(string(out), clusterName) && h.clusterAlive() {
+	if err == nil && containsLine(string(out), clusterName) && h.clusterAlive() && h.nodeCount() == clusterNodes {
 		t.Logf("kind cluster %q already exists; reusing", clusterName)
 	} else {
 		// A cluster that is listed but not answering is usually one
 		// caught mid-teardown by the previous test's cleanup (kind
 		// delete can return while the node container is still dying);
 		// exec'ing into it fails with setns errors. Delete + recreate.
+		// A cluster with the wrong node count is a leftover from
+		// before the multi-node profile (#194); recreate it too.
 		if err == nil && containsLine(string(out), clusterName) {
-			t.Logf("kind cluster %q exists but is not responding; recreating", clusterName)
+			t.Logf("kind cluster %q exists but is not usable (dead or wrong topology); recreating", clusterName)
 			_ = exec.Command("kind", "delete", "cluster", "--name", clusterName).Run()
 		}
-		t.Logf("creating kind cluster %q", clusterName)
-		h.Run("kind", "create", "cluster", "--name", clusterName, "--wait", "2m")
+		t.Logf("creating kind cluster %q (%d nodes)", clusterName, clusterNodes)
+		cfg := filepath.Join(t.TempDir(), "kind.yaml")
+		if err := os.WriteFile(cfg, []byte(kindConfig), 0o600); err != nil {
+			t.Fatalf("write kind config: %v", err)
+		}
+		h.Run("kind", "create", "cluster", "--name", clusterName, "--config", cfg, "--wait", "2m")
 	}
 
 	// Teardown is owned by TestMain: the cluster (and the install
@@ -84,6 +91,40 @@ func TestMain(m *testing.M) {
 
 // sharedClusterName is the one cluster every e2e test shares.
 const sharedClusterName = "ollie-e2e"
+
+// The shared cluster is MULTI-NODE (#194): one control-plane + one
+// worker, so cross-node behavior — per-node series staying distinct
+// under the fan-out merge, degraded semantics when one node's agent
+// dies — is exercised against real topology instead of only
+// in-process simulations. The v0.5 cross-node merge bug shipped with
+// green CI precisely because the old cluster was single-node. Two
+// nodes keeps runner cost bounded; the agent DaemonSet tolerates the
+// control-plane taint (`operator: Exists`), so both nodes run agents.
+const clusterNodes = 2
+
+const kindConfig = `kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+`
+
+// nodeCount returns the number of Ready-or-not nodes the shared
+// cluster reports, or 0 when unreachable.
+func (h *Harness) nodeCount() int {
+	out, err := exec.Command("kubectl", "--context", "kind-"+h.ClusterName,
+		"get", "nodes", "-o", "name").Output()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
+}
 
 // installState makes InstallOllie / DeployTestWorkload once-per-run:
 // later tests reuse the deployed stack instead of re-building and
@@ -181,6 +222,88 @@ func (h *Harness) PullAndLoad(image string) {
 	h.t.Helper()
 	h.Run("docker", "pull", image)
 	h.KindLoad(image)
+}
+
+// probeImage is the in-cluster auth-probe image (tests/e2e/probe),
+// loaded once per run by BuildProbeImage.
+const probeImage = "ollie-e2e-probe:e2e"
+
+// probeState makes BuildProbeImage once-per-run, mirroring installState.
+var probeState struct {
+	sync.Mutex
+	built  bool
+	failed string
+}
+
+// BuildProbeImage compiles the stdlib probe (tests/e2e/probe) into a
+// FROM-scratch image and loads it into the shared cluster, once per run.
+// The probe is the only way to hit the agent/query auth boundaries from
+// a real pod IP: port-forward terminates on loopback, which every auth
+// layer exempts by design (#145), so a forwarded port can never observe
+// a rejection.
+func (h *Harness) BuildProbeImage(repoRoot string) {
+	h.t.Helper()
+	probeState.Lock()
+	defer probeState.Unlock()
+	if probeState.failed != "" {
+		h.t.Fatalf("skipping: earlier probe build failed: %s", probeState.failed)
+	}
+	if probeState.built {
+		return
+	}
+	probeState.failed = "BuildProbeImage did not complete"
+
+	dir := h.t.TempDir()
+	bin := filepath.Join(dir, "probe")
+	build := exec.Command("go", "build", "-o", bin, "./tests/e2e/probe")
+	build.Dir = repoRoot
+	// Static linux binary for a scratch image; match the kind node arch
+	// (== host arch).
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
+	if out, err := build.CombinedOutput(); err != nil {
+		h.t.Fatalf("building probe: %v\n%s", err, out)
+	}
+	dockerfile := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(dockerfile,
+		[]byte("FROM scratch\nCOPY probe /probe\nENTRYPOINT [\"/probe\"]\n"), 0o600); err != nil {
+		h.t.Fatalf("write probe Dockerfile: %v", err)
+	}
+	h.DockerBuild(probeImage, dockerfile, dir)
+	h.KindLoad(probeImage)
+
+	probeState.built = true
+	probeState.failed = ""
+}
+
+// RunProbe runs the probe image as a one-off pod in the default
+// namespace — an untrusted, non-ollie ServiceAccount — with the given
+// probe args, waits for it to finish, and returns its stdout. The pod is
+// deleted on cleanup. BuildProbeImage must have run first.
+func (h *Harness) RunProbe(podName string, args ...string) string {
+	h.t.Helper()
+	_, _ = h.KubectlOutput("delete", "pod", podName, "-n", "default", "--ignore-not-found", "--now")
+	runArgs := []string{"run", podName, "-n", "default",
+		"--image=" + probeImage, "--image-pull-policy=Never",
+		"--restart=Never", "--command", "--", "/probe"}
+	runArgs = append(runArgs, args...)
+	h.Kubectl(runArgs...)
+	h.t.Cleanup(func() {
+		_, _ = h.KubectlOutput("delete", "pod", podName, "-n", "default", "--ignore-not-found", "--now")
+	})
+	h.PollKubectl(2*time.Minute, "probe pod "+podName+" reaches a terminal phase",
+		func() (string, error) {
+			return h.KubectlOutput("get", "pod", podName, "-n", "default",
+				"-o", "jsonpath={.status.phase}")
+		},
+		func(out string) bool {
+			p := strings.TrimSpace(out)
+			return p == "Succeeded" || p == "Failed"
+		})
+	out, err := h.KubectlOutput("logs", podName, "-n", "default")
+	if err != nil {
+		h.t.Fatalf("probe %s logs: %v", podName, err)
+	}
+	return out
 }
 
 // WaitRollout blocks until the workload's rollout completes.
