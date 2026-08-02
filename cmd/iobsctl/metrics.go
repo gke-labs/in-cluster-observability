@@ -77,9 +77,14 @@ func runMetrics(args []string) {
 		q.Set("time", strconv.FormatInt(ts.Unix(), 10))
 	}
 
-	u := fmt.Sprintf("http://127.0.0.1:%d%s?%s", local, path, q.Encode())
+	tlsConf, err := queryTLSConfig(ctx, g)
+	if err != nil {
+		fatal("%v", err)
+	}
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConf}}
+	u := fmt.Sprintf("https://127.0.0.1:%d%s?%s", local, path, q.Encode())
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		fatal("query: %v", err)
 	}

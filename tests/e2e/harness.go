@@ -22,6 +22,7 @@ package e2e
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -374,6 +375,22 @@ func (h *Harness) PortForward(target, namespace string, localPort, remotePort in
 	return fmt.Sprintf("http://127.0.0.1:%d", localPort)
 }
 
+// PortForwardTLS is PortForward with an https base URL, for the query
+// server's :9095 which serves TLS (ADR-0029). PollHTTP's client skips
+// certificate verification — the strict chain-of-trust assertions live
+// in TestIntraTLSVerification; here the tunnel already runs through
+// the authenticated API server connection.
+func (h *Harness) PortForwardTLS(target, namespace string, localPort, remotePort int) string {
+	h.t.Helper()
+	return "https" + strings.TrimPrefix(h.PortForward(target, namespace, localPort, remotePort), "http")
+}
+
+// insecureClient tolerates the self-signed/CA-issued serving certs on
+// intra-ollie listeners when polling through port-forward tunnels.
+var insecureClient = &http.Client{Transport: &http.Transport{
+	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test tunnel; verification covered by TestIntraTLSVerification
+}}
+
 // PollHTTP polls url until predicate returns true or the timeout
 // expires; on timeout it fails the test with the last response body.
 func (h *Harness) PollHTTP(url string, timeout time.Duration, desc string, predicate func(body string) bool) {
@@ -381,7 +398,7 @@ func (h *Harness) PollHTTP(url string, timeout time.Duration, desc string, predi
 	deadline := time.Now().Add(timeout)
 	var last string
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := insecureClient.Get(url)
 		if err == nil {
 			b, rerr := io.ReadAll(resp.Body)
 			resp.Body.Close()

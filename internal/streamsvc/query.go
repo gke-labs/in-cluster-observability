@@ -16,7 +16,11 @@ package streamsvc
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -25,6 +29,7 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -60,7 +65,37 @@ type QueryServer struct {
 	// BearerTokenFile authenticates upstream agent subscriptions
 	// (same token the remote-read fan-out presents).
 	BearerToken func() string
-	Logger      *slog.Logger
+	// AgentCAFile switches agent dials to verified TLS (ADR-0029,
+	// #197): the PEM bundle the agents' serving certs chain to.
+	// Empty keeps plaintext (dev / tests) — no skip-verify mode in
+	// between. The file is read per dial, so a CA that lands after
+	// startup (fresh install) is picked up on the next subscription.
+	AgentCAFile string
+	// AgentServerName is the DNS SAN to verify agent certs against
+	// (agents are dialed by pod IP but serve headless-Service SANs).
+	AgentServerName string
+	Logger          *slog.Logger
+}
+
+// agentCreds builds the per-dial transport credentials: verified TLS
+// when AgentCAFile is set, plaintext otherwise.
+func (s *QueryServer) agentCreds() (credentials.TransportCredentials, error) {
+	if s.AgentCAFile == "" {
+		return insecure.NewCredentials(), nil
+	}
+	pem, err := os.ReadFile(s.AgentCAFile)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no CA certificates in %s", s.AgentCAFile)
+	}
+	return credentials.NewTLS(&tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
+		ServerName: s.AgentServerName,
+	}), nil
 }
 
 // SubscribeSpans validates the filter locally (fail fast with a
@@ -129,7 +164,15 @@ func (s *QueryServer) SubscribeSpans(req *streamv1.SubscribeSpansRequest, srv st
 }
 
 func (s *QueryServer) forwardAgent(ctx context.Context, addr string, req *streamv1.SubscribeSpansRequest, out chan<- *streamv1.SpanEvent, logger *slog.Logger) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, err := s.agentCreds()
+	if err != nil {
+		// Typically the CA file not yet mounted on a fresh install;
+		// the subscriber sees Unavailable when every agent drops and
+		// resubscribes once the Secret lands.
+		logger.Warn("stream mux: agent TLS credentials unavailable", "addr", addr, "err", err)
+		return
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		logger.Warn("stream mux: agent dial failed", "addr", addr, "err", err)
 		return

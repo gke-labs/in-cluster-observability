@@ -26,7 +26,7 @@ import (
 
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -49,8 +49,12 @@ func runSpans(args []string) {
 	}
 	defer stop()
 
+	tlsConf, err := queryTLSConfig(ctx, g)
+	if err != nil {
+		fatal("%v", err)
+	}
 	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", local),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsConf)))
 	if err != nil {
 		fatal("dial: %v", err)
 	}

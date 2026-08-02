@@ -251,8 +251,10 @@ need a token bound to `ollie-promql-reader`):
 ```sh
 kubectl port-forward -n ollie-system deploy/ollie-query 9095:9095 &
 
-curl -s 'http://127.0.0.1:9095/api/v1/query?query=sum(ollie_agent_up)' | jq .
-curl -s 'http://127.0.0.1:9095/api/v1/query?query=sum(rate(http_server_request_duration_count{k8s_namespace_name="demo"}[1m]))' | jq .
+# :9095 serves TLS from the self-managed CA (v0.6); -k skips
+# verification for this ad-hoc check. iobsctl verifies properly.
+curl -sk 'https://127.0.0.1:9095/api/v1/query?query=sum(ollie_agent_up)' | jq .
+curl -sk 'https://127.0.0.1:9095/api/v1/query?query=sum(rate(http_server_request_duration_count{k8s_namespace_name="demo"}[1m]))' | jq .
 ```
 
 The first proves the whole fan-out path (one sample per node, summed

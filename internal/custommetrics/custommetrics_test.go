@@ -278,13 +278,3 @@ resources:
 		t.Fatalf("default qps code = %d", code)
 	}
 }
-
-func TestSelfSignedCert(t *testing.T) {
-	cert, err := SelfSignedCert([]string{"ollie-query.ollie-system.svc", "localhost"})
-	if err != nil {
-		t.Fatalf("SelfSignedCert: %v", err)
-	}
-	if len(cert.Certificate) != 1 || cert.PrivateKey == nil {
-		t.Fatal("incomplete certificate")
-	}
-}

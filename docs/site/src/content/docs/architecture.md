@@ -85,16 +85,17 @@ Two Deployments complete the picture:
   controller is present.
 - **`ollie-query`** is stateless and discovers agents via the
   `ollie-agent` headless Service. It fans PromQL reads out to every
-  agent's `:9091` remote-read endpoint **at the storage layer**
+  agent's `:9091` remote-read endpoint (TLS, verified against the
+  self-managed CA) **at the storage layer**
   (agents are secondary queriers — one dead agent degrades the answer
   and flags it, rather than failing it), evaluates centrally with the
   stock Prometheus engine, and serves:
   - **`/api/v1/query` + `/api/v1/query_range` on `:9095`**
-    (bearer-token authed) — the standard PromQL HTTP API.
+    (TLS + bearer-token authed) — the standard PromQL HTTP API.
   - **`custom.metrics.k8s.io/v1beta1` on `:6443`** — the HPA path,
     behind the kube-aggregator with mTLS front-proxy client-cert auth.
-  - **A streaming mux on `:9096`** that multiplexes the per-agent span
-    streams for subscribers like `iobsctl`.
+  - **A streaming mux on `:9096`** (TLS) that multiplexes the
+    per-agent span streams for subscribers like `iobsctl`.
 
 Data stays on the node that captured it until a query actually needs
 it; there is no central ingest pipeline to size or shard.

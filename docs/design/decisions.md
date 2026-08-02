@@ -888,6 +888,33 @@ The single hard hazard is the transition. Dropping `insecureSkipTLSVerify` while
 
 ---
 
+## ADR-0029: v0.6 intra-ollie TLS — every internal hop encrypted, clients fail closed (#197)
+
+**Status.** Accepted (2026-08-02).
+
+**Context.** v0.5 left the intra-ollie hops as bearer-token over plaintext: agent `:9091` remote-read and `:9092` span stream (dialed by `ollie-query`), and query `:9095` PromQL API and `:9096` stream mux (dialed by `iobsctl` and other subscribers). NetworkPolicy bounds who can connect and tokens gate what they can do, but the tokens themselves — cluster-scoped read credentials — transit unencrypted on the pod network. ADR-0028 built the machinery that closes this: a self-managed CA in the controller, CA-issued serving certs in Secrets (already carrying `ca.crt` for exactly this consumer), and a hot-reloading `GetCertificate`.
+
+**Decision.** All four hops serve TLS unconditionally, and the in-cluster clients verify it, failing closed.
+
+1. **One shared serving cert per component, DNS SANs over IP SANs.** The controller's CA manager issues a second serving Secret, `ollie-agent-serving`, alongside `ollie-query-serving` — same issuance/renewal path, same `ca.crt` distribution, one new `ensureServingCert` call. Every agent pod shares the one keypair. Fan-out clients dial agents by *pod IP* (headless-Service A records), so per-pod IP SANs would need per-pod certs and reissuance on every reschedule; instead the cert carries the headless-Service DNS forms (`ollie-agent.<ns>.svc[.cluster.local]`) and clients set `tls.Config.ServerName` to the same FQDN they resolved. Verification proves "holds a key the ollie CA signed for the agent Service", which is the actual trust statement we need; per-pod identity adds nothing an attacker on the pod network couldn't also satisfy by compromising the shared DaemonSet Secret.
+2. **Servers never speak plaintext.** Agent `:9091`/`:9092` and query `:9095`/`:9096` adopt the ADR-0028 §3 posture via a shared `ca.ServingTLSConfig` helper: the mounted CA-issued keypair when present (hot-reloaded on rotation), a self-signed bootstrap cert until then (`optional: true` Secret mount; fresh installs and `go run` never block on the controller). `:6443` now shares the same `tls.Config` base with its front-proxy `ClientCAs` layered on top.
+3. **Clients verify or degrade — no skip-verify middle ground.** `ollie-query` pins `ca.crt` from its own mounted serving Secret (`--agent-ca-file`) with `ServerName` = the agent Service FQDN, for both the remote-read fan-out (Prometheus `HTTPClientConfig.TLSConfig`) and the stream mux (per-dial gRPC creds). While the CA file is missing or an agent still serves its bootstrap cert (first-install window, one kubelet Secret-sync at most; upgrades have no window because the Secrets pre-exist), dials fail and surface through the *existing* degraded machinery (`degraded:true` + missing nodes; stream subscribers get `Unavailable` and resubscribe) — never a silent plaintext or unverified fallback. The only opt-outs are explicit: `--agent-ca-file=""` (or the unmodified default path absent *outside* a cluster) selects plaintext for dev.
+4. **`iobsctl` verifies against the CA from the Secret.** The CLI already holds a kubeconfig; it reads `ca.crt` from `<service>-serving` and pins `ServerName` to `<service>.<ns>.svc` (the port-forward dials 127.0.0.1, so SNI must be overridden). Users without Secret read permission get an actionable error and an explicit `--insecure-tls` escape hatch — encrypted either way, and the tunnel itself already rides the user's authenticated API-server connection.
+5. **`:9090` scrape deliberately stays plaintext.** It is the one hop consumed by *foreign* clients (GMP and other Prometheus scrapers), where mandating our CA would break drop-in scrape configs; token auth (#145) + NetworkPolicy (#143) already gate it, and the payload is metrics, not credentials with cluster-wide read scope. Revisit only if a scraper-side CA-distribution story appears.
+
+**Consequences.**
+
+- ✅ Bearer tokens no longer transit the pod network in the clear on any ollie-to-ollie hop; a pod-network sniffer gets TLS on `:9091`/`:9092`/`:9095`/`:9096`.
+- ✅ Zero new trust anchors or dependencies: same CA, same Secrets, same reload machinery as ADR-0028; the controller change is one more `ensureServingCert` call plus SANs.
+- ✅ Fail-closed by construction: a missing CA file or an unverifiable peer produces the already-tested degraded/unavailable behavior, not plaintext. e2e proof: `TestIntraTLSVerification` (strict RootCAs+ServerName round-trips against `:9095` and `:9091`) and `TestIobsctl` (CA-verified `:9095`/`:9096` through the real CLI path).
+- ⚠️ First-install bootstrap window: until the controller issues Secrets and kubelet mounts them (≈ one Secret-sync interval), queries report degraded and streams are unavailable. Judged acceptable — it is self-healing, upgrade installs skip it entirely, and the alternative (temporary skip-verify) is a downgrade path an attacker could hold open.
+- ⚠️ All agents share one serving keypair (DaemonSet-mounted Secret). Compromise of one node's Secret impersonates any agent — but that Secret is namespace-scoped and node-local compromise already yields the node's kubelet creds; per-pod certs would not change the outcome.
+- 📌 `iobsctl` now needs Secret `get` in the install namespace for full verification (or `--insecure-tls`). Kubelet probes on `:9095` switch to `scheme: HTTPS` (kubelet skips verification, so the bootstrap cert is fine).
+
+**Implemented in.** `v0.6/phase-2b-intra-tls`.
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.

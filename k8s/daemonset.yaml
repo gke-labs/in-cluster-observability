@@ -200,6 +200,9 @@ spec:
             # the production posture is visible: tsdb on the
             # ollie-data emptyDir, remote read on :9091 guarded by
             # the same token auth as :9090 (ollie-query-reader).
+            # :9091 and :9092 serve TLS from the self-managed CA
+            # (intra-ollie TLS, ADR-0029) via the serving-cert mount
+            # below; :9090 stays plaintext for scraper compatibility.
             - --store-dir=/var/lib/ollie/tsdb
             - --query-addr=0.0.0.0:9091
             - --stream-addr=0.0.0.0:9092
@@ -280,6 +283,16 @@ spec:
           volumeMounts:
             - name: obi-config
               mountPath: /etc/ollie/obi-config
+            # CA-issued serving cert for the :9091/:9092 listeners
+            # (intra-ollie TLS, ADR-0029). optional:true so the agent
+            # starts before the controller has issued it — a
+            # self-signed bootstrap cert serves (never plaintext)
+            # until kubelet mounts the real one, and the query
+            # server's verifying dials treat the node as degraded
+            # until then.
+            - name: serving-cert
+              mountPath: /etc/ollie/tls
+              readOnly: true
             # Node-local metric store (v0.5, #78): tsdb blocks + WAL.
             # emptyDir by design (ADR-0025) — with 10-minute retention
             # there is nothing worth persisting across pod deletion,
@@ -289,6 +302,10 @@ spec:
               mountPath: /var/lib/ollie
 
       volumes:
+        - name: serving-cert
+          secret:
+            secretName: ollie-agent-serving
+            optional: true
         - name: bpf
           hostPath:
             path: /sys/fs/bpf

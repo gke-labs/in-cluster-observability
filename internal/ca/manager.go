@@ -57,6 +57,14 @@ type Manager struct {
 	QueryService    string   // Service whose endpoints back :6443, e.g. ollie-query
 	TLSPort         int      // query custom-metrics port, e.g. 6443
 
+	// Agent serving cert (intra-ollie TLS, ADR-0029/#197): one shared
+	// keypair for every agent's :9091/:9092 listener, mounted by the
+	// DaemonSet. Clients dial pod IPs but verify against the headless-
+	// Service DNS SANs via tls.Config.ServerName. Empty
+	// AgentServingSecret disables issuance.
+	AgentServingSecret   string
+	AgentServingDNSNames []string
+
 	CALifetime      time.Duration
 	ServingLifetime time.Duration
 	RenewBefore     time.Duration // re-issue serving cert this long before expiry
@@ -106,8 +114,13 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ensure CA: %w", err)
 	}
-	if err := m.ensureServingCert(ctx, authority); err != nil {
-		return fmt.Errorf("ensure serving cert: %w", err)
+	if err := m.ensureServingCert(ctx, authority, m.ServingSecret, m.ServingDNSNames, "query"); err != nil {
+		return fmt.Errorf("ensure query serving cert: %w", err)
+	}
+	if m.AgentServingSecret != "" {
+		if err := m.ensureServingCert(ctx, authority, m.AgentServingSecret, m.AgentServingDNSNames, "agent"); err != nil {
+			return fmt.Errorf("ensure agent serving cert: %w", err)
+		}
 	}
 	if err := m.reconcileAPIService(ctx, authority); err != nil {
 		return fmt.Errorf("reconcile APIService: %w", err)
@@ -166,10 +179,10 @@ func (m *Manager) ensureCA(ctx context.Context) (*CA, error) {
 	}
 }
 
-// ensureServingCert makes the serving-cert Secret match the CA and the
+// ensureServingCert makes a serving-cert Secret match the CA and the
 // wanted SANs, re-issuing on drift or when it is within RenewBefore of
-// expiry.
-func (m *Manager) ensureServingCert(ctx context.Context, authority *CA) error {
+// expiry. component labels the Secret and log lines ("query", "agent").
+func (m *Manager) ensureServingCert(ctx context.Context, authority *CA, secretName string, dnsNames []string, component string) error {
 	now := m.clock()
 	servingLifetime := m.ServingLifetime
 	if servingLifetime == 0 {
@@ -180,7 +193,7 @@ func (m *Manager) ensureServingCert(ctx context.Context, authority *CA) error {
 		renewBefore = servingLifetime / 3
 	}
 
-	sec, err := m.Clientset.CoreV1().Secrets(m.Namespace).Get(ctx, m.ServingSecret, metav1.GetOptions{})
+	sec, err := m.Clientset.CoreV1().Secrets(m.Namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -188,22 +201,22 @@ func (m *Manager) ensureServingCert(ctx context.Context, authority *CA) error {
 
 	if exists {
 		cur := sec.Data[corev1.TLSCertKey]
-		if ServingCertMatches(cur, authority.CertPEM(), m.ServingDNSNames, now) {
+		if ServingCertMatches(cur, authority.CertPEM(), dnsNames, now) {
 			if exp, eErr := ServingCertExpiry(cur); eErr == nil && exp.Sub(now) > renewBefore {
 				return nil // healthy; nothing to do
 			}
 		}
 	}
 
-	certPEM, keyPEM, err := authority.IssueServingCert(m.ServingDNSNames, now, servingLifetime)
+	certPEM, keyPEM, err := authority.IssueServingCert(dnsNames, now, servingLifetime)
 	if err != nil {
 		return err
 	}
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      m.ServingSecret,
+			Name:      secretName,
 			Namespace: m.Namespace,
-			Labels:    ollieLabels("query"),
+			Labels:    ollieLabels(component),
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -219,15 +232,15 @@ func (m *Manager) ensureServingCert(ctx context.Context, authority *CA) error {
 		sec.Data = desired.Data
 		sec.Type = desired.Type
 		if _, uErr := m.Clientset.CoreV1().Secrets(m.Namespace).Update(ctx, sec, metav1.UpdateOptions{}); uErr != nil {
-			return fmt.Errorf("update %s: %w", m.ServingSecret, uErr)
+			return fmt.Errorf("update %s: %w", secretName, uErr)
 		}
-		m.log().Info("re-issued query serving cert", "secret", m.ServingSecret)
+		m.log().Info("re-issued serving cert", "component", component, "secret", secretName)
 		return nil
 	}
 	if _, cErr := m.Clientset.CoreV1().Secrets(m.Namespace).Create(ctx, desired, metav1.CreateOptions{}); cErr != nil {
-		return fmt.Errorf("create %s: %w", m.ServingSecret, cErr)
+		return fmt.Errorf("create %s: %w", secretName, cErr)
 	}
-	m.log().Info("issued query serving cert", "secret", m.ServingSecret)
+	m.log().Info("issued serving cert", "component", component, "secret", secretName)
 	return nil
 }
 

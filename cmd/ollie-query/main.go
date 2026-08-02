@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -58,6 +59,10 @@ var version = "v0.5.0-dev"
 // server presents to the agents' authenticated read endpoints.
 const defaultTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token" //nolint:gosec // path, not a credential
 
+// defaultAgentCAFile is ca.crt from the mounted ollie-query-serving
+// Secret — the CA every intra-ollie serving cert chains to (ADR-0029).
+const defaultAgentCAFile = "/etc/ollie/tls/ca.crt"
+
 func main() {
 	versionOnly := flag.Bool("version", false, "print version and exit")
 	httpAddr := flag.String("http-addr", "0.0.0.0:9095", "bind address for the query HTTP API and health probes")
@@ -67,6 +72,8 @@ func main() {
 	resolveInterval := flag.Duration("resolve-interval", 15*time.Second, "how often to re-resolve --agent-service")
 	queryTimeout := flag.Duration("query-timeout", 30*time.Second, "overall per-query deadline; each agent gets 0.8x the remainder")
 	tokenFile := flag.String("agent-token-file", defaultTokenFile, "bearer token file presented to the agents' authenticated read endpoints (empty disables)")
+	agentCAFile := flag.String("agent-ca-file", defaultAgentCAFile, "PEM CA bundle the agents' :9091/:9092 serving certs chain to (ADR-0029, #197); switches agent dials to verified HTTPS/TLS with --agent-server-name. In-cluster this is ca.crt from the mounted ollie-query-serving Secret; dials fail closed until the file exists. Empty dials plaintext (dev). Outside a cluster the missing default is dropped silently so `go run` works.")
+	agentServerName := flag.String("agent-server-name", "", "DNS SAN to verify agent serving certs against (agents are dialed by pod IP but serve their headless-Service names); empty defaults to --agent-service")
 	apiAuth := flag.String("api-auth", "auto", "authn/authz for /api/v1/* (same posture as the agent's --scrape-auth): 'token' validates bearer tokens via TokenReview + SubjectAccessReview against the request path as nonResourceURL (grant via the ollie-promql-reader ClusterRole); 'none' disables; 'auto' picks token in-cluster. Health probes are always unauthenticated; loopback is always exempt (port-forward debugging).")
 	apiAuthAudiences := flag.String("api-auth-audiences", "", "comma-separated token audiences for --api-auth=token; empty accepts standard API-server-audience tokens")
 	tlsAddr := flag.String("tls-addr", "0.0.0.0:6443", "bind address for the HTTPS listener serving custom.metrics.k8s.io to the aggregation layer (#96). Empty disables.")
@@ -112,9 +119,41 @@ func main() {
 		}
 	}
 
+	// Agent-dial TLS (ADR-0029): fail closed in-cluster — a missing CA
+	// file just means the controller hasn't issued it yet, and reads
+	// stay degraded (never plaintext) until kubelet mounts the Secret.
+	// Only the unmodified default is dropped, and only outside a
+	// cluster, so `go run` keeps working.
+	agentCA := *agentCAFile
+	if agentCA != "" {
+		if _, err := os.Stat(agentCA); err != nil && agentCA == defaultAgentCAFile {
+			if _, icErr := rest.InClusterConfig(); icErr != nil {
+				agentCA = ""
+				logger.Info("agent TLS: no CA file and not in-cluster; dialing agents over plaintext (dev)")
+			}
+		}
+	}
+	sn := *agentServerName
+	if sn == "" {
+		sn = *agentService
+	}
+
+	// Serving TLS shared by every listener this binary owns (:6443
+	// custom-metrics, :9095 API, :9096 stream): the CA-issued keypair
+	// from the ollie-query-serving Secret, hot-reloaded on rotation,
+	// with a self-signed bootstrap fallback until it is mounted
+	// (fresh install / dev). Never plaintext.
+	servingTLS, err := ca.ServingTLSConfig(*tlsCertFile, *tlsKeyFile, "ollie-query", strings.Split(*tlsHostnames, ","), logger)
+	if err != nil {
+		logger.Error("serving TLS init failed", "err", err)
+		os.Exit(1)
+	}
+
 	queryable := fanout.NewQueryable(fanout.Config{
 		Discoverer:      disc,
 		BearerTokenFile: tf,
+		CAFile:          agentCA,
+		ServerName:      sn,
 		Timeout:         *queryTimeout,
 		Logger:          logger,
 	})
@@ -150,7 +189,9 @@ func main() {
 				}
 				return strings.TrimSpace(string(raw))
 			},
-			Logger: logger,
+			AgentCAFile:     agentCA,
+			AgentServerName: sn,
+			Logger:          logger,
 		}
 		var opts []grpc.ServerOption
 		mw, err := buildStreamAuth(*apiAuth, *apiAuthAudiences, logger)
@@ -161,6 +202,7 @@ func main() {
 		if mw != nil {
 			opts = append(opts, grpc.StreamInterceptor(mw.StreamInterceptor()))
 		}
+		opts = append(opts, grpc.Creds(credentials.NewTLS(servingTLS.Clone())))
 		gs := grpc.NewServer(opts...)
 		streamv1.RegisterStreamServiceServer(gs, qs)
 		sl, err := net.Listen("tcp", *streamAddr)
@@ -196,19 +238,7 @@ func main() {
 		// back to a self-signed bootstrap cert — the APIService stays
 		// insecureSkipTLSVerify:true until the controller confirms every
 		// endpoint serves the CA cert and flips it.
-		bootstrap, err := custommetrics.SelfSignedCert(strings.Split(*tlsHostnames, ","))
-		if err != nil {
-			logger.Error("self-signed cert generation failed", "err", err)
-			os.Exit(1)
-		}
-		reloader := ca.NewReloader(*tlsCertFile, *tlsKeyFile, logger)
-		getCertificate := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if cert, rErr := reloader.GetCertificate(hello); rErr == nil {
-				return cert, nil
-			}
-			return &bootstrap, nil
-		}
-		tlsConf := &tls.Config{GetCertificate: getCertificate, MinVersion: tls.VersionTLS12}
+		tlsConf := servingTLS.Clone()
 		cmHandler := http.Handler(cm.Routes())
 
 		// Require the aggregation layer's front-proxy client certificate
@@ -254,14 +284,18 @@ func main() {
 		logger.Error("listen failed", "addr", *httpAddr, "err", err)
 		os.Exit(1)
 	}
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         servingTLS.Clone(),
+	}
 	go func() {
-		if err := srv.Serve(l); err != nil && err != http.ErrServerClosed {
+		if err := srv.ServeTLS(l, "", ""); err != nil && err != http.ErrServerClosed {
 			logger.Error("http server failed", "err", err)
 			cancel()
 		}
 	}()
-	logger.Info("query API listening", "addr", l.Addr().String(), "agent-service", *agentService, "agent-port", *agentPort)
+	logger.Info("query API listening (TLS)", "addr", l.Addr().String(), "agent-service", *agentService, "agent-port", *agentPort)
 
 	<-ctx.Done()
 	logger.Info("shutting down")

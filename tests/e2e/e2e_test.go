@@ -15,6 +15,9 @@
 package e2e
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -129,7 +132,7 @@ func TestQueryFanout(t *testing.T) {
 	// port-forward terminates on the pod loopback, which --api-auth
 	// exempts by design; in-cluster consumers need a token bound to
 	// ollie-promql-reader.
-	base := h.PortForward("deploy/ollie-query", "ollie-system", 19095, 9095)
+	base := h.PortForwardTLS("deploy/ollie-query", "ollie-system", 19095, 9095)
 
 	// The store self-scrapes every second, so ollie_agent_up reaches
 	// the tsdb within seconds of agent boot; sum() proves engine +
@@ -453,7 +456,7 @@ func TestMultiNodeFanout(t *testing.T) {
 
 	h.InstallOllie(repoRoot)
 
-	base := h.PortForward("deploy/ollie-query", "ollie-system", 19096, 9095)
+	base := h.PortForwardTLS("deploy/ollie-query", "ollie-system", 19096, 9095)
 
 	// One ollie_agent_up series per node survives the fan-out merge: a
 	// merge that deduped across nodes would return 1.
@@ -534,6 +537,91 @@ func TestCustomMetricsTLSVerification(t *testing.T) {
 				"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`)
 		},
 		func(out string) bool { return strings.TrimSpace(out) == "True" })
+}
+
+// TestIntraTLSVerification (#197, ADR-0029): the intra-ollie hops —
+// query :9095 and agent :9091 — serve certificates that chain to the
+// self-managed CA and carry the expected Service DNS SANs, verified
+// strictly (RootCAs + ServerName, no InsecureSkipVerify). The :9096
+// stream hop shares :9095's tls.Config and is covered end-to-end by
+// TestIobsctl, whose client verifies against the same CA.
+func TestIntraTLSVerification(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, sharedClusterName)
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+
+	// Trust anchor: ca.crt distributed in the serving Secrets by the
+	// controller's CA manager.
+	var caPEM []byte
+	h.PollKubectl(3*time.Minute, "ollie-query-serving Secret carries ca.crt",
+		func() (string, error) {
+			return h.KubectlOutput("get", "secret", "ollie-query-serving", "-n", "ollie-system",
+				"-o", `jsonpath={.data.ca\.crt}`)
+		},
+		func(out string) bool {
+			raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+			if err != nil || len(raw) == 0 {
+				return false
+			}
+			caPEM = raw
+			return true
+		})
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		t.Fatalf("ca.crt from ollie-query-serving is not a usable PEM CA")
+	}
+
+	// verifiedGet polls until an HTTPS round-trip through the tunnel
+	// succeeds under strict verification. A fresh pod may serve the
+	// self-signed bootstrap cert until kubelet mounts the issued
+	// Secret (~1 kubelet sync), so failures early in the window are
+	// expected and retried.
+	verifiedGet := func(base, serverName, desc string) string {
+		t.Helper()
+		client := &http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: serverName, MinVersion: tls.VersionTLS12},
+		}}
+		deadline := time.Now().Add(3 * time.Minute)
+		var lastErr error
+		for time.Now().Before(deadline) {
+			resp, err := client.Get(base)
+			if err == nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				return fmt.Sprintf("%d %s", resp.StatusCode, string(b))
+			}
+			lastErr = err
+			time.Sleep(3 * time.Second)
+		}
+		t.Fatalf("%s: no verified TLS round-trip within 3m (last error: %v)", desc, lastErr)
+		return ""
+	}
+
+	// Query API :9095 under real verification: the PromQL round-trip
+	// must succeed AND return data (loopback tunnel is auth-exempt).
+	qBase := h.PortForwardTLS("deploy/ollie-query", "ollie-system", 19098, 9095)
+	out := verifiedGet(qBase+"/api/v1/query?query="+url.QueryEscape("sum(ollie_agent_up)"),
+		"ollie-query.ollie-system.svc", "query :9095 verified TLS")
+	if !strings.Contains(out, `"status":"success"`) {
+		t.Fatalf("query over verified TLS did not succeed: %s", out)
+	}
+
+	// Agent remote-read :9091 under real verification: the handshake
+	// chains to the CA with the agent Service SAN. The endpoint
+	// requires a bearer token for real reads, but loopback (the
+	// port-forward) is exempt; any HTTP status proves the TLS layer.
+	aBase := h.PortForwardTLS("ds/ollie-agent", "ollie-system", 19099, 9091)
+	verifiedGet(aBase+"/api/v1/read", "ollie-agent.ollie-system.svc", "agent :9091 verified TLS")
 }
 
 func TestAuthBoundaries(t *testing.T) {
@@ -640,7 +728,7 @@ func TestDegradedOnAgentLoss(t *testing.T) {
 
 	h.InstallOllie(repoRoot)
 
-	base := h.PortForward("deploy/ollie-query", "ollie-system", 19097, 9095)
+	base := h.PortForwardTLS("deploy/ollie-query", "ollie-system", 19097, 9095)
 
 	// Baseline: both agents present and the query is not degraded.
 	h.PollHTTP(base+"/api/v1/query?query="+url.QueryEscape("count(ollie_agent_up)"),
@@ -669,7 +757,7 @@ func TestDegradedOnAgentLoss(t *testing.T) {
 	var last string
 	saw := false
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(base + "/api/v1/query?query=" + url.QueryEscape("count(ollie_agent_up)"))
+		resp, err := insecureClient.Get(base + "/api/v1/query?query=" + url.QueryEscape("count(ollie_agent_up)"))
 		if err == nil {
 			b, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()

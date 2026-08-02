@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package custommetrics
+package ca
 
 import (
 	"crypto/ecdsa"
@@ -22,15 +22,18 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"time"
 )
 
 // SelfSignedCert generates an in-memory ECDSA P-256 serving
-// certificate for the given DNS names (ADR-0025 §7: the aggregation
-// layer requires HTTPS on the backend; the APIService registers with
-// insecureSkipTLSVerify until the v0.6 TLS work wires a real CA).
-func SelfSignedCert(dnsNames []string) (tls.Certificate, error) {
+// certificate for the given DNS names. It is the bootstrap fallback
+// every TLS listener serves until the controller's CA manager has
+// issued the real serving cert (fresh install) or when running outside
+// a cluster (dev): traffic is encrypted from the first byte, and
+// verifying clients converge once the CA-issued Secret is mounted.
+func SelfSignedCert(commonName string, dnsNames []string) (tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("generate key: %w", err)
@@ -41,7 +44,7 @@ func SelfSignedCert(dnsNames []string) (tls.Certificate, error) {
 	}
 	tmpl := x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "ollie-query"},
+		Subject:               pkix.Name{CommonName: commonName},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
@@ -56,5 +59,29 @@ func SelfSignedCert(dnsNames []string) (tls.Certificate, error) {
 	return tls.Certificate{
 		Certificate: [][]byte{der},
 		PrivateKey:  key,
+	}, nil
+}
+
+// ServingTLSConfig builds the standard intra-ollie serving posture
+// (ADR-0029): prefer the CA-issued keypair at certFile/keyFile
+// (hot-reloaded on rotation via Reloader), fall back to a fresh
+// self-signed certificate until those files exist. Callers that need
+// client-cert auth (the custom-metrics front-proxy check) add
+// ClientCAs/ClientAuth on the returned config; callers sharing it
+// across listeners must Clone() per listener.
+func ServingTLSConfig(certFile, keyFile, commonName string, dnsNames []string, logger *slog.Logger) (*tls.Config, error) {
+	bootstrap, err := SelfSignedCert(commonName, dnsNames)
+	if err != nil {
+		return nil, fmt.Errorf("self-signed bootstrap cert: %w", err)
+	}
+	reloader := NewReloader(certFile, keyFile, logger)
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if cert, rErr := reloader.GetCertificate(hello); rErr == nil {
+				return cert, nil
+			}
+			return &bootstrap, nil
+		},
 	}, nil
 }

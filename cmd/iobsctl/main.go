@@ -39,12 +39,13 @@ import (
 var version = "v0.5.0-dev"
 
 type globalOpts struct {
-	kubeconfig string
-	kubectx    string
-	namespace  string
-	service    string
-	output     string
-	timeout    time.Duration
+	kubeconfig  string
+	kubectx     string
+	namespace   string
+	service     string
+	output      string
+	timeout     time.Duration
+	insecureTLS bool
 }
 
 func main() {
@@ -83,7 +84,9 @@ Subcommands:
 
 Global flags (both subcommands):
   --kubeconfig, --context, --namespace (ollie-system), --service (ollie-query),
-  --output text|json, --timeout (default 5m)
+  --output text|json, --timeout (default 5m), --insecure-tls (skip TLS
+  verification; default verifies against ca.crt from the
+  <service>-serving Secret, which needs Secret read permission)
 `)
 }
 
@@ -95,6 +98,7 @@ func addGlobalFlags(fs *flag.FlagSet) *globalOpts {
 	fs.StringVar(&g.service, "service", "ollie-query", "query-server service/deployment name")
 	fs.StringVar(&g.output, "output", "text", "output format: text|json")
 	fs.DurationVar(&g.timeout, "timeout", 5*time.Minute, "overall command timeout")
+	fs.BoolVar(&g.insecureTLS, "insecure-tls", false, "skip verification of the query server's TLS certificate (ADR-0029). Default verifies against ca.crt from the <service>-serving Secret, which needs Secret read permission in --namespace.")
 	return g
 }
 

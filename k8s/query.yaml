@@ -52,9 +52,14 @@ spec:
         - name: query
           image: ollie-query
           args:
+            # :9095 serves TLS (intra-ollie TLS, ADR-0029) with the
+            # same CA-issued cert as :6443; agent dials verify against
+            # ca.crt from the mounted ollie-query-serving Secret and
+            # fail closed (degraded, never plaintext) until it exists.
             - --http-addr=0.0.0.0:9095
             - --agent-service=ollie-agent.ollie-system.svc.cluster.local
             - --agent-port=9091
+            - --agent-ca-file=/etc/ollie/tls/ca.crt
             # custom.metrics.k8s.io backend for the aggregation
             # layer (#96). Serving cert is issued by the self-managed CA
             # (ADR-0028) and mounted from ollie-query-serving below;
@@ -74,11 +79,13 @@ spec:
             - name: grpc-stream
               containerPort: 9096
           livenessProbe:
-            httpGet: { path: /healthz/live, port: http }
+            # scheme HTTPS: kubelet probes skip cert verification, so
+            # the bootstrap self-signed cert is fine here.
+            httpGet: { path: /healthz/live, port: http, scheme: HTTPS }
             initialDelaySeconds: 10
             periodSeconds: 20
           readinessProbe:
-            httpGet: { path: /healthz/ready, port: http }
+            httpGet: { path: /healthz/ready, port: http, scheme: HTTPS }
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:

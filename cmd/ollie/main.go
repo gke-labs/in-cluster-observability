@@ -44,9 +44,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/gke-labs/in-cluster-observability/internal/ca"
 	"github.com/gke-labs/in-cluster-observability/internal/debugendpoint"
 	"github.com/gke-labs/in-cluster-observability/internal/export"
 	"github.com/gke-labs/in-cluster-observability/internal/scrapeauth"
@@ -88,6 +90,16 @@ func main() {
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
 	debugAddr := flag.String("debug-endpoint-addr", debugendpoint.DefaultAddr, "loopback bind address for the debug endpoint")
 
+	// Intra-ollie TLS (ADR-0029, #197): the remote-read (:9091) and
+	// stream (:9092) listeners always serve TLS — the CA-issued keypair
+	// once the controller has mounted it, a self-signed bootstrap cert
+	// until then. The :9090 scrape endpoint deliberately stays
+	// plaintext for scraper compatibility (GMP); token auth +
+	// NetworkPolicy bound it.
+	tlsCertFile := flag.String("tls-cert-file", "/etc/ollie/tls/tls.crt", "PEM serving cert issued by the self-managed CA (ADR-0029), mounted from the ollie-agent-serving Secret; hot-reloaded on rotation. Falls back to a self-signed bootstrap cert when absent (fresh install / dev).")
+	tlsKeyFile := flag.String("tls-key-file", "/etc/ollie/tls/tls.key", "PEM serving key paired with --tls-cert-file")
+	tlsHostnames := flag.String("tls-hostnames", "ollie-agent.ollie-system.svc,ollie-agent.ollie-system.svc.cluster.local,localhost", "comma-separated DNS SANs for the self-signed bootstrap cert used until the CA-issued serving cert is mounted")
+
 	// v0.1 compatibility: stay-alive made sense when there was no real
 	// work to do. v0.2's agent always blocks on signals; the flag is
 	// kept for backward compat but is a no-op now.
@@ -104,6 +116,19 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Serving TLS for the intra-ollie listeners (:9091 remote-read,
+	// :9092 stream), per ADR-0029: the CA-issued cert when the Secret
+	// is mounted, a self-signed bootstrap cert until then — never
+	// plaintext. The verifying client (ollie-query) treats the
+	// bootstrap cert as unverifiable and reports the node degraded
+	// until the real cert lands, which self-heals within a kubelet
+	// Secret-remount interval on fresh installs.
+	servingTLS, err := ca.ServingTLSConfig(*tlsCertFile, *tlsKeyFile, "ollie-agent", strings.Split(*tlsHostnames, ","), slog.Default())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "serving TLS init failed: %v\n", err)
+		os.Exit(1)
+	}
 
 	// One MeterProvider feeds everything: agent self-obs counters
 	// (ollie_capture_*) and the metric forwarder that re-emits OBI's
@@ -151,6 +176,7 @@ func main() {
 		if mw != nil {
 			opts = append(opts, grpc.StreamInterceptor(mw.StreamInterceptor()))
 		}
+		opts = append(opts, grpc.Creds(credentials.NewTLS(servingTLS.Clone())))
 		gs := grpc.NewServer(opts...)
 		streamv1.RegisterStreamServiceServer(gs, &streamsvc.AgentServer{Spans: spanBuf})
 		sl, err := net.Listen("tcp", *streamAddr)
@@ -319,9 +345,13 @@ func main() {
 				fmt.Fprintf(os.Stderr, "read listen %s: %v\n", *queryAddr, err)
 				os.Exit(1)
 			}
-			readServer := &http.Server{Handler: readMux, ReadHeaderTimeout: 5 * time.Second}
+			readServer := &http.Server{
+				Handler:           readMux,
+				ReadHeaderTimeout: 5 * time.Second,
+				TLSConfig:         servingTLS.Clone(),
+			}
 			go func() {
-				if err := readServer.Serve(rl); err != nil && err != http.ErrServerClosed {
+				if err := readServer.ServeTLS(rl, "", ""); err != nil && err != http.ErrServerClosed {
 					fmt.Fprintf(os.Stderr, "read server: %v\n", err)
 				}
 			}()
@@ -330,7 +360,7 @@ func main() {
 				defer rCancel()
 				_ = readServer.Shutdown(rCtx)
 			}()
-			fmt.Fprintf(os.Stderr, "remote-read endpoint: http://%s/api/v1/read\n", rl.Addr())
+			fmt.Fprintf(os.Stderr, "remote-read endpoint: https://%s/api/v1/read\n", rl.Addr())
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "metric store: disabled (--store-dir empty)")

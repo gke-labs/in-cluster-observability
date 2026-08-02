@@ -24,14 +24,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 )
 
-// forward port-forwards to a Ready query-server pod and returns the
-// local port plus a stop function.
-func forward(ctx context.Context, g *globalOpts, remotePort int) (int, func(), error) {
+// kubeClient loads the kubeconfig per the global flags and returns the
+// rest config plus a typed clientset.
+func kubeClient(g *globalOpts) (*rest.Config, *kubernetes.Clientset, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if g.kubeconfig != "" {
 		rules.ExplicitPath = g.kubeconfig
@@ -40,9 +41,19 @@ func forward(ctx context.Context, g *globalOpts, remotePort int) (int, func(), e
 		rules, &clientcmd.ConfigOverrides{CurrentContext: g.kubectx},
 	).ClientConfig()
 	if err != nil {
-		return 0, nil, fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, nil, fmt.Errorf("loading kubeconfig: %w", err)
 	}
 	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, client, nil
+}
+
+// forward port-forwards to a Ready query-server pod and returns the
+// local port plus a stop function.
+func forward(ctx context.Context, g *globalOpts, remotePort int) (int, func(), error) {
+	cfg, client, err := kubeClient(g)
 	if err != nil {
 		return 0, nil, err
 	}

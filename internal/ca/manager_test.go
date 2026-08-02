@@ -124,7 +124,7 @@ func TestEnsureServingCertLifecycle(t *testing.T) {
 	authority, _ := m.ensureCA(ctx)
 
 	// Create.
-	if err := m.ensureServingCert(ctx, authority); err != nil {
+	if err := m.ensureServingCert(ctx, authority, m.ServingSecret, m.ServingDNSNames, "query"); err != nil {
 		t.Fatalf("ensureServingCert (create): %v", err)
 	}
 	sec := getSecret(t, cs, testServSec)
@@ -140,7 +140,7 @@ func TestEnsureServingCertLifecycle(t *testing.T) {
 	}
 
 	// Idempotent: healthy cert is not re-issued.
-	if err := m.ensureServingCert(ctx, authority); err != nil {
+	if err := m.ensureServingCert(ctx, authority, m.ServingSecret, m.ServingDNSNames, "query"); err != nil {
 		t.Fatalf("ensureServingCert (noop): %v", err)
 	}
 	if string(getSecret(t, cs, testServSec).Data[corev1.TLSCertKey]) != string(first) {
@@ -149,7 +149,7 @@ func TestEnsureServingCertLifecycle(t *testing.T) {
 
 	// SAN drift forces re-issue.
 	m.ServingDNSNames = append(testDNS, "extra.svc")
-	if err := m.ensureServingCert(ctx, authority); err != nil {
+	if err := m.ensureServingCert(ctx, authority, m.ServingSecret, m.ServingDNSNames, "query"); err != nil {
 		t.Fatalf("ensureServingCert (drift): %v", err)
 	}
 	if string(getSecret(t, cs, testServSec).Data[corev1.TLSCertKey]) == string(first) {
@@ -164,14 +164,14 @@ func TestEnsureServingCertReissuesNearExpiry(t *testing.T) {
 	m.ServingLifetime = 10 * time.Minute
 	m.RenewBefore = 9 * time.Minute // renew window covers most of the life
 
-	if err := m.ensureServingCert(ctx, authority); err != nil {
+	if err := m.ensureServingCert(ctx, authority, m.ServingSecret, m.ServingDNSNames, "query"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	first := getSecret(t, cs, testServSec).Data[corev1.TLSCertKey]
 
 	// Advance clock to inside the renewal window.
 	m.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
-	if err := m.ensureServingCert(ctx, authority); err != nil {
+	if err := m.ensureServingCert(ctx, authority, m.ServingSecret, m.ServingDNSNames, "query"); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
 	if string(getSecret(t, cs, testServSec).Data[corev1.TLSCertKey]) == string(first) {
@@ -280,5 +280,28 @@ func seedEndpoints(t *testing.T, cs *fake.Clientset, ips ...string) {
 		if _, uErr := cs.CoreV1().Endpoints(testNS).Update(context.Background(), ep, metav1.UpdateOptions{}); uErr != nil {
 			t.Fatalf("seed endpoints: %v", err)
 		}
+	}
+}
+
+// Phase 2b (#197): the manager issues a second serving cert for the
+// agents' :9091/:9092 listeners off the same CA.
+func TestEnsureAgentServingCert(t *testing.T) {
+	m, cs, _ := newManager(t)
+	ctx := context.Background()
+	authority, _ := m.ensureCA(ctx)
+
+	agentDNS := []string{"ollie-agent.ollie-system.svc", "ollie-agent.ollie-system.svc.cluster.local", "localhost"}
+	if err := m.ensureServingCert(ctx, authority, "ollie-agent-serving", agentDNS, "agent"); err != nil {
+		t.Fatalf("ensureServingCert (agent): %v", err)
+	}
+	sec := getSecret(t, cs, "ollie-agent-serving")
+	if !ServingCertMatches(sec.Data[corev1.TLSCertKey], authority.CertPEM(), agentDNS, time.Now()) {
+		t.Fatal("agent serving cert does not chain to the CA / cover the agent SANs")
+	}
+	if string(sec.Data["ca.crt"]) != string(authority.CertPEM()) {
+		t.Error("agent serving secret must carry ca.crt for verifying clients")
+	}
+	if sec.Labels["app.kubernetes.io/component"] != "agent" {
+		t.Errorf("component label = %q, want agent", sec.Labels["app.kubernetes.io/component"])
 	}
 }

@@ -88,6 +88,8 @@ metadata:
     app.kubernetes.io/name: ollie
     app.kubernetes.io/component: controller
 rules:
+  # CA + serving-cert Secrets (ADR-0028; the agent serving Secret
+  # rides the same rule for intra-ollie TLS, ADR-0029).
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "update", "patch"]

@@ -71,6 +71,8 @@ func main() {
 	caNamespace := flag.String("ca-namespace", "", "namespace holding the CA and serving-cert Secrets; empty = in-cluster namespace (falls back to ollie-system)")
 	caSecret := flag.String("ca-secret", "ollie-ca", "Secret name for the self-managed CA cert+key")
 	caServingSecret := flag.String("ca-serving-secret", "ollie-query-serving", "Secret name for the query serving cert+key issued by the CA")
+	caAgentServingSecret := flag.String("ca-agent-serving-secret", "ollie-agent-serving", "Secret name for the agent serving cert+key issued by the CA (intra-ollie TLS, ADR-0029); empty disables")
+	caAgentService := flag.String("ca-agent-service", "ollie-agent", "agent headless Service name; its DNS forms are the SANs of the agent serving cert")
 	caQueryService := flag.String("ca-query-service", "ollie-query", "query Service whose ready endpoints back the custom-metrics :6443 port; gates the insecureSkipTLSVerify flip")
 	caTLSPort := flag.Int("ca-tls-port", 6443, "query custom-metrics TLS port probed by the flip gate")
 	caAPIService := flag.String("ca-apiservice", "v1beta1.custom.metrics.k8s.io", "APIService whose caBundle the CA manager populates")
@@ -163,7 +165,10 @@ func main() {
 			QueryService:    *caQueryService,
 			TLSPort:         *caTLSPort,
 			ServingLifetime: *caServingLifetime,
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)).With("component", "ca-manager"),
+
+			AgentServingSecret:   *caAgentServingSecret,
+			AgentServingDNSNames: servingDNSNames(*caAgentService, ns),
+			Logger:               slog.New(slog.NewTextHandler(os.Stderr, nil)).With("component", "ca-manager"),
 		}
 		if aErr := mgr.Add(caMgr); aErr != nil {
 			fatalf("register CA manager: %v\n", aErr)

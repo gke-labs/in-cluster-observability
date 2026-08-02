@@ -15,9 +15,12 @@
 package fanout
 
 import (
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/util/annotations"
 
+	"github.com/gke-labs/in-cluster-observability/internal/ca"
 	"github.com/gke-labs/in-cluster-observability/internal/store"
 )
 
@@ -245,5 +249,97 @@ func TestDiscovererStatic(t *testing.T) {
 	}
 	if got := d.Addrs(); len(got) != 1 || got[0] != "10.0.0.1:9091" {
 		t.Fatalf("Addrs() = %v", got)
+	}
+}
+
+// Phase 2b (#197, ADR-0029): with a CAFile the fan-out dials verified
+// HTTPS — succeeding against a CA-issued serving cert, treating a
+// server outside the CA (e.g. a bootstrap self-signed cert) as a miss,
+// and self-healing when the CA file appears after startup.
+func TestFanoutTLS(t *testing.T) {
+	now := time.Now()
+
+	authority, err := ca.NewCA(now, ca.CADefaultLifetime)
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	certPEM, keyPEM, err := authority.IssueServingCert([]string{"ollie-agent.ollie-system.svc"}, now, ca.ServingDefaultLifetime)
+	if err != nil {
+		t.Fatalf("IssueServingCert: %v", err)
+	}
+	keypair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+
+	a := newFakeAgent(t)
+	a.write(t, "node-1", now, 10)
+	// Re-serve the same handler over TLS with the CA-issued cert.
+	tlsSrv := httptest.NewUnstartedServer(a.srv.Config.Handler)
+	tlsSrv.TLS = &tls.Config{Certificates: []tls.Certificate{keypair}}
+	tlsSrv.StartTLS()
+	t.Cleanup(tlsSrv.Close)
+	addr := tlsSrv.Listener.Addr().String()
+
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+
+	disc := NewDiscoverer("unused.invalid", 0, time.Hour, nil)
+	disc.SetStaticAddrs([]string{addr})
+	q := NewQueryable(Config{
+		Discoverer: disc,
+		CAFile:     caFile,
+		ServerName: "ollie-agent.ollie-system.svc",
+		Timeout:    10 * time.Second,
+	})
+	eng := promql.NewEngine(promql.EngineOpts{
+		MaxSamples:               1_000_000,
+		Timeout:                  10 * time.Second,
+		NoStepSubqueryIntervalFn: func(int64) int64 { return time.Minute.Milliseconds() },
+	})
+
+	run := func() (float64, *Stats, error) {
+		ctx, stats := WithStats(t.Context())
+		qry, err := eng.NewInstantQuery(ctx, q, nil, `sum(test_requests_total)`, now)
+		if err != nil {
+			t.Fatalf("NewInstantQuery: %v", err)
+		}
+		defer qry.Close()
+		res := qry.Exec(ctx)
+		if res.Err != nil {
+			return 0, stats, res.Err
+		}
+		vec, err := res.Vector()
+		if err != nil || len(vec) == 0 {
+			return 0, stats, err
+		}
+		return vec[0].F, stats, nil
+	}
+
+	// CA file missing: the dial must fail closed (degraded), and the
+	// failure must not be cached.
+	if _, stats, _ := run(); !stats.Degraded() {
+		t.Fatal("fan-out succeeded without a CA file; want fail-closed miss")
+	}
+
+	// CA file lands (kubelet mounts the Secret): the same Queryable
+	// self-heals and the verified read succeeds.
+	if err := os.WriteFile(caFile, authority.CertPEM(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v, stats, err := run()
+	if err != nil {
+		t.Fatalf("verified read: %v", err)
+	}
+	if stats.Degraded() || v != 10 {
+		t.Fatalf("verified read = %v (degraded=%v, missing=%v), want 10 healthy", v, stats.Degraded(), stats.Missing())
+	}
+
+	// A server the CA never signed is a miss, not data.
+	foreign := newFakeAgent(t)
+	foreignTLS := httptest.NewTLSServer(foreign.srv.Config.Handler)
+	t.Cleanup(foreignTLS.Close)
+	disc.SetStaticAddrs([]string{foreignTLS.Listener.Addr().String()})
+	if _, stats, _ := run(); !stats.Degraded() {
+		t.Fatal("fan-out accepted a cert outside the ollie CA")
 	}
 }

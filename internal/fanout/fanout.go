@@ -200,6 +200,7 @@ func statsFrom(ctx context.Context) *Stats {
 type Queryable struct {
 	disc    *Discoverer
 	auth    promconfig.HTTPClientConfig
+	scheme  string
 	timeout time.Duration
 	logger  *slog.Logger
 
@@ -213,6 +214,18 @@ type Config struct {
 	// BearerTokenFile, when set, authenticates reads to the agents
 	// (the agent guards /api/v1/read with TokenReview + SAR).
 	BearerTokenFile string
+	// CAFile switches the agent dials to verified HTTPS (ADR-0029,
+	// #197): the PEM CA bundle the agents' serving certs chain to,
+	// typically ca.crt from the ollie-query-serving Secret. Empty
+	// keeps plaintext HTTP (dev / tests) — there is deliberately no
+	// skip-verify mode in between.
+	CAFile string
+	// ServerName is the DNS SAN to verify the agents' certs against.
+	// Agents are dialed by pod IP, but they all serve one cert whose
+	// SANs are the headless-Service DNS forms, so the client overrides
+	// SNI/verification with that name (usually the same FQDN the
+	// Discoverer resolves).
+	ServerName string
 	// Timeout caps a single remote read call (transport-level;
 	// per-query deadlines are usually tighter).
 	Timeout time.Duration
@@ -234,22 +247,36 @@ func NewQueryable(cfg Config) *Queryable {
 			CredentialsFile: cfg.BearerTokenFile,
 		}
 	}
+	scheme := "http"
+	if cfg.CAFile != "" {
+		scheme = "https"
+		auth.TLSConfig = promconfig.TLSConfig{
+			CAFile:     cfg.CAFile,
+			ServerName: cfg.ServerName,
+		}
+	}
 	return &Queryable{
 		disc:    cfg.Discoverer,
 		auth:    auth,
+		scheme:  scheme,
 		timeout: cfg.Timeout,
 		logger:  cfg.Logger,
 		clients: map[string]remote.ReadClient{},
 	}
 }
 
+// client returns the cached read client for addr, building it on first
+// use. Construction fails while the CA file is still missing (fresh
+// install, before kubelet mounts the serving Secret); the error is not
+// cached, so the next Select retries and the path self-heals once the
+// file lands.
 func (q *Queryable) client(addr string) (remote.ReadClient, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if c, ok := q.clients[addr]; ok {
 		return c, nil
 	}
-	u, err := url.Parse(fmt.Sprintf("http://%s/api/v1/read", addr))
+	u, err := url.Parse(fmt.Sprintf("%s://%s/api/v1/read", q.scheme, addr))
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +301,13 @@ func (q *Queryable) Querier(mint, maxt int64) (storage.Querier, error) {
 	for _, addr := range addrs {
 		c, err := q.client(addr)
 		if err != nil {
+			// Typically the CA file not yet mounted (ADR-0029 fresh
+			// install). The agent must count as MISSING, not silently
+			// absent — a stand-in querier records the miss at Select
+			// time (Stats travel in the Select ctx), so the response
+			// is flagged degraded like any other agent failure.
 			q.logger.Warn("fanout: client build failed", "addr", addr, "err", err)
+			queriers = append(queriers, &missQuerier{addr: addr})
 			continue
 		}
 		queriers = append(queriers, &agentQuerier{
@@ -406,3 +439,29 @@ func (c *agentSeriesSet) Err() error {
 	}
 	return nil
 }
+
+// missQuerier stands in for an agent whose read client could not be
+// built (e.g. --agent-ca-file not yet mounted, ADR-0029). It records
+// the miss on the query's Stats at Select time so the answer degrades
+// exactly like an agent that failed mid-read, and never errors the
+// merge.
+type missQuerier struct {
+	addr string
+}
+
+func (m *missQuerier) Select(ctx context.Context, _ bool, _ *storage.SelectHints, _ ...*labels.Matcher) storage.SeriesSet {
+	if s := statsFrom(ctx); s != nil {
+		s.miss(m.addr)
+	}
+	return storage.EmptySeriesSet()
+}
+
+func (m *missQuerier) LabelValues(context.Context, string, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+	return nil, nil, nil
+}
+
+func (m *missQuerier) LabelNames(context.Context, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+	return nil, nil, nil
+}
+
+func (m *missQuerier) Close() error { return nil }
