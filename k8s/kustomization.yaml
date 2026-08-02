@@ -26,4 +26,5 @@ resources:
   - agent-service.yaml
   - query.yaml
   - custommetrics.yaml
+  - webhook.yaml
   - networkpolicy.yaml

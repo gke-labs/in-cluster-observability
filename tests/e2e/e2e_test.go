@@ -624,6 +624,104 @@ func TestIntraTLSVerification(t *testing.T) {
 	verifiedGet(aBase+"/api/v1/read", "ollie-agent.ollie-system.svc", "agent :9091 verified TLS")
 }
 
+// TestWebhookValidation (#90, ADR-0030): the validating admission
+// webhook comes up on the self-managed CA, the controller commits the
+// caBundle + failurePolicy Fail once the endpoints verify, and then
+// semantically invalid CRs are rejected at admission while
+// merely-suspicious ones are accepted with warnings.
+func TestWebhookValidation(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E not set, skipping e2e test")
+	}
+
+	repoRoot := GitRoot(t)
+	h := NewHarness(t, sharedClusterName)
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.DumpDiagnostics()
+		}
+	})
+
+	h.InstallOllie(repoRoot)
+
+	// Gated commit: manifest ships failurePolicy Ignore + empty
+	// caBundle; the controller enforces Fail only after every webhook
+	// endpoint serves the CA cert (kubelet Secret remount + probe, so
+	// allow a few resync passes).
+	h.PollKubectl(5*time.Minute, "webhook caBundle committed and failurePolicy enforced",
+		func() (string, error) {
+			return h.KubectlOutput("get", "validatingwebhookconfiguration", "ollie-webhook",
+				"-o", `jsonpath={range .webhooks[*]}{.failurePolicy}:{.clientConfig.caBundle}{"\n"}{end}`)
+		},
+		func(out string) bool {
+			lines := strings.Fields(strings.TrimSpace(out))
+			if len(lines) != 2 {
+				return false
+			}
+			for _, l := range lines {
+				parts := strings.SplitN(l, ":", 2)
+				if parts[0] != "Fail" || len(parts) < 2 || len(parts[1]) == 0 {
+					return false
+				}
+			}
+			return true
+		})
+
+	// CombinedOutput: admission rejections (and warnings) arrive on
+	// stderr, which KubectlOutput would drop.
+	apply := func(manifest string) (string, error) {
+		t.Helper()
+		f := filepath.Join(t.TempDir(), "cr.yaml")
+		if err := os.WriteFile(f, []byte(manifest), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("kubectl", "--context", "kind-"+h.ClusterName, "apply", "-f", f).CombinedOutput()
+		return string(out), err
+	}
+
+	const tmDupPorts = `apiVersion: ollie.gke-labs.dev/v1alpha1
+kind: TrafficMonitor
+metadata: {name: webhook-dup-ports, namespace: default}
+spec:
+  workloadSelector: {matchLabels: {app: echo}}
+  protocols: {http: {enabled: true, ports: [8080, 8080]}}
+`
+	if out, err := apply(tmDupPorts); err == nil {
+		t.Errorf("duplicate-port TrafficMonitor was admitted: %s", out)
+		h.Kubectl("delete", "trafficmonitor", "webhook-dup-ports", "-n", "default", "--ignore-not-found")
+	} else if !strings.Contains(out, "Duplicate") && !strings.Contains(out, "duplicate") {
+		t.Errorf("rejection did not mention the duplicate port: %s", out)
+	}
+
+	const tmBadSelector = `apiVersion: ollie.gke-labs.dev/v1alpha1
+kind: TrafficMonitor
+metadata: {name: webhook-bad-selector, namespace: default}
+spec:
+  workloadSelector:
+    matchExpressions: [{key: app, operator: Exists, values: [oops]}]
+  protocols: {http: {enabled: true}}
+`
+	if out, err := apply(tmBadSelector); err == nil {
+		t.Errorf("invalid-selector TrafficMonitor was admitted: %s", out)
+		h.Kubectl("delete", "trafficmonitor", "webhook-bad-selector", "-n", "default", "--ignore-not-found")
+	}
+
+	// Legal but suspicious: zero-match selector is ACCEPTED (soft
+	// warning only — the workload may deploy later).
+	const tmZeroMatch = `apiVersion: ollie.gke-labs.dev/v1alpha1
+kind: TrafficMonitor
+metadata: {name: webhook-zero-match, namespace: default}
+spec:
+  workloadSelector: {matchLabels: {app: not-deployed-yet}}
+  protocols: {http: {enabled: true}}
+`
+	out, err := apply(tmZeroMatch)
+	if err != nil {
+		t.Errorf("zero-match TrafficMonitor rejected (must be warning-only): %v\n%s", err, out)
+	}
+	h.Kubectl("delete", "trafficmonitor", "webhook-zero-match", "-n", "default", "--ignore-not-found")
+}
+
 func TestAuthBoundaries(t *testing.T) {
 	if os.Getenv("RUN_E2E") == "" {
 		t.Skip("RUN_E2E not set, skipping e2e test")

@@ -267,12 +267,17 @@ func TestReconcileEndToEnd(t *testing.T) {
 
 func seedEndpoints(t *testing.T, cs *fake.Clientset, ips ...string) {
 	t.Helper()
+	seedServiceEndpoints(t, cs, testSvc, ips...)
+}
+
+func seedServiceEndpoints(t *testing.T, cs *fake.Clientset, svc string, ips ...string) {
+	t.Helper()
 	addrs := make([]corev1.EndpointAddress, 0, len(ips))
 	for _, ip := range ips {
 		addrs = append(addrs, corev1.EndpointAddress{IP: ip})
 	}
 	ep := &corev1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{Name: testSvc, Namespace: testNS},
+		ObjectMeta: metav1.ObjectMeta{Name: svc, Namespace: testNS},
 		Subsets:    []corev1.EndpointSubset{{Addresses: addrs}},
 	}
 	if _, err := cs.CoreV1().Endpoints(testNS).Create(context.Background(), ep, metav1.CreateOptions{}); err != nil {
@@ -303,5 +308,84 @@ func TestEnsureAgentServingCert(t *testing.T) {
 	}
 	if sec.Labels["app.kubernetes.io/component"] != "agent" {
 		t.Errorf("component label = %q, want agent", sec.Labels["app.kubernetes.io/component"])
+	}
+}
+
+// fakeWebhookStore mirrors the ValidatingWebhookConfiguration commit
+// semantics: the only mutation is the atomic caBundle+failurePolicy
+// commit.
+type fakeWebhookStore struct {
+	caBundle    []byte
+	enforced    bool // failurePolicy Fail
+	commitCalls int
+}
+
+func (f *fakeWebhookStore) Get(_ context.Context, caPEM []byte) (bool, error) {
+	return f.enforced && string(f.caBundle) == string(caPEM), nil
+}
+
+func (f *fakeWebhookStore) Commit(_ context.Context, caPEM []byte) error {
+	f.caBundle = caPEM
+	f.enforced = true
+	f.commitCalls++
+	return nil
+}
+
+// Phase 2c (#90, ADR-0030): the webhook caBundle + failurePolicy flip
+// is gated exactly like the APIService commit — never enforced while
+// any webhook endpoint is unverifiable, exactly once when all are.
+func TestReconcileWebhookGate(t *testing.T) {
+	m, cs, _ := newManager(t)
+	wh := &fakeWebhookStore{}
+	m.Webhook = wh
+	m.WebhookService = "ollie-controller"
+	m.WebhookPort = 9443
+	ctx := context.Background()
+	authority, _ := m.ensureCA(ctx)
+
+	goodPEM, _, _ := authority.IssueServingCert(testDNS, time.Now(), ServingDefaultLifetime)
+	goodDER, _ := decodePEM(goodPEM, "CERTIFICATE")
+	foreign := mustCA(t)
+	badPEM, _, _ := foreign.IssueServingCert(testDNS, time.Now(), ServingDefaultLifetime)
+	badDER, _ := decodePEM(badPEM, "CERTIFICATE")
+
+	// No endpoints: bootstrap posture (Ignore, no caBundle) untouched.
+	if err := m.reconcileWebhook(ctx, authority); err != nil {
+		t.Fatalf("reconcileWebhook (no endpoints): %v", err)
+	}
+	if wh.enforced || wh.commitCalls != 0 {
+		t.Fatal("enforced failurePolicy Fail with zero ready endpoints (would block CR writes)")
+	}
+
+	// One of two endpoints still serves the bootstrap self-signed cert.
+	seedServiceEndpoints(t, cs, "ollie-controller", "10.0.1.1", "10.0.1.2")
+	served := map[string][]byte{
+		"10.0.1.1:9443": goodDER,
+		"10.0.1.2:9443": badDER,
+	}
+	m.probeLeaf = func(_ context.Context, addr string) ([]byte, error) { return served[addr], nil }
+	if err := m.reconcileWebhook(ctx, authority); err != nil {
+		t.Fatalf("reconcileWebhook (mixed): %v", err)
+	}
+	if wh.enforced {
+		t.Fatal("enforced Fail while an endpoint was unverifiable (CR writes would break)")
+	}
+
+	// All verified: one atomic commit.
+	served["10.0.1.2:9443"] = goodDER
+	if err := m.reconcileWebhook(ctx, authority); err != nil {
+		t.Fatalf("reconcileWebhook (all good): %v", err)
+	}
+	if !wh.enforced || string(wh.caBundle) != string(authority.CertPEM()) || wh.commitCalls != 1 {
+		t.Fatalf("commit state = enforced:%v calls:%d", wh.enforced, wh.commitCalls)
+	}
+
+	// Steady state: no probe, no further commits.
+	m.probeLeaf = func(_ context.Context, _ string) ([]byte, error) { t.Fatal("probed after commit"); return nil, nil }
+	if err := m.reconcileWebhook(ctx, authority); err != nil {
+		t.Fatalf("reconcileWebhook (steady): %v", err)
+	}
+	if wh.commitCalls != 1 {
+		t.Errorf("commit called %d times, want 1", wh.commitCalls)
 	}
 }

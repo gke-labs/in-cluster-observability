@@ -1,0 +1,69 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Validating admission webhook for TrafficMonitor +
+# ClusterTrafficPolicy (#90, ADR-0030), served by ollie-controller on
+# :9443 with a cert from the self-managed CA (ADR-0028).
+#
+# Bootstrap posture per ADR-0030: this manifest ships an EMPTY caBundle
+# and failurePolicy Ignore, so CR writes are never blocked by a webhook
+# that is not up yet (fresh install, controller rollout, or a `kubectl
+# apply -k` that reset this object). The controller's CA manager owns
+# the transition: once every webhook endpoint verifiably serves the
+# CA-issued cert, it commits the caBundle AND flips failurePolicy to
+# Fail in one patch, and re-asserts that state every resync. Do not set
+# a caBundle or failurePolicy Fail here. During the Ignore window the
+# reconciler's reactive Conflict conditions (ADR-0022.4) still catch
+# what admission would have.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: ollie-webhook
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: controller
+webhooks:
+  - name: trafficmonitors.ollie.gke-labs.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: ollie-controller
+        namespace: ollie-system
+        port: 9443
+        # controller-runtime derives this path from the GVK.
+        path: /validate-ollie-gke-labs-dev-v1alpha1-trafficmonitor
+    rules:
+      - apiGroups: ["ollie.gke-labs.dev"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["trafficmonitors"]
+  - name: clustertrafficpolicies.ollie.gke-labs.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: ollie-controller
+        namespace: ollie-system
+        port: 9443
+        path: /validate-ollie-gke-labs-dev-v1alpha1-clustertrafficpolicy
+    rules:
+      - apiGroups: ["ollie.gke-labs.dev"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clustertrafficpolicies"]

@@ -72,6 +72,14 @@ rules:
   - apiGroups: ["apiregistration.k8s.io"]
     resources: ["apiservices"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  # Validating webhook (ADR-0030, #90): the leader injects the CA into
+  # the ValidatingWebhookConfiguration caBundle and flips failurePolicy
+  # Ignore->Fail once every webhook endpoint serves the CA cert.
+  # resourceNames-scoped: get/update/patch only on the one object.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: ["ollie-webhook"]
+    verbs: ["get", "update", "patch"]
 ---
 # Namespaced grant for the self-managed CA (ADR-0028): the controller
 # creates/rotates the CA and query serving-cert Secrets in its own

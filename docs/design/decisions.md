@@ -915,6 +915,30 @@ The single hard hazard is the transition. Dropping `insecureSkipTLSVerify` while
 
 ---
 
+## ADR-0030: v0.6 validating admission webhook on the self-managed CA, enforced only after verification (#90)
+
+**Status.** Accepted (2026-08-02).
+
+**Context.** #90 (deferred from v0.4 per ADR-0022, then from v0.5) wants admission-time rejection of semantically invalid `TrafficMonitor`/`ClusterTrafficPolicy` objects. The original blocker — "a webhook needs HTTPS, which needs cert-manager" — dissolved when ADR-0028 shipped the self-managed CA. Two constraints shape the design: (a) the issue predates the CRD schema and the reconciler's reactive Conflict conditions (ADR-0022.4), which already cover most of its list — only checks the schema *cannot* express belong in the webhook; (b) several of the issue's validations (sampling-rate ranges, path-templating RE2, sink catalogs) reference fields that only land with #108/#109, so v0.6 ships the webhook *infrastructure* plus today's checks, and later fields slot into the same validator.
+
+**Decision.**
+
+1. **Webhook serves from the controller, on every replica.** controller-runtime's webhook server on `:9443` in `ollie-controller` — the binary that already owns the CRDs, the cache (pods + CRs for the soft checks), and the CA. Serving posture is ADR-0029 §2 verbatim: `ca.ServingTLSConfig` with a new CA-issued `ollie-webhook-serving` Secret (third `ensureServingCert` call), optional mount, self-signed bootstrap fallback. Pod readiness gates on the webhook listener so a replica never receives admission traffic before it can answer.
+2. **Enforcement is a gated atomic commit, mirroring the APIService flip.** The manifest ships the `ValidatingWebhookConfiguration` with **empty `caBundle` and `failurePolicy: Ignore`** — the safe bootstrap posture: a webhook that is not up yet, mid-rollout, or freshly reset by `kubectl apply -k` can never block CR writes. The CA manager (leader) probes every ready webhook endpoint and, once each serves a CA-signed leaf, patches **`caBundle` + `failurePolicy: Fail` for all webhook entries in one write**, re-asserted every resync. There is no configuration where `Fail` points at an unverifiable backend. During the Ignore window, invalid CRs that slip through are caught reactively by the reconciler's Conflict conditions — the pre-webhook status quo, now bounded to bootstrap.
+3. **Validation split.** The CRD OpenAPI schema keeps type/range/enum checks. The webhook **rejects** what the schema cannot: incoherent label selectors (`LabelSelectorAsSelector` failures — bad operators, `Exists` with values) and duplicate or out-of-range HTTP ports. It **warns, never rejects,** on legal-but-suspicious states that may be transient during rollouts (control-plane.md §3): no protocol enabled, ports set with `http.enabled: false`, selector matching zero pods, selection overlapping a sibling TM. Warnings ride the admission response into kubectl output. Soft checks read the manager cache and are skipped (not failed) on cache errors — a cache hiccup must not block writes. Deletes are never blocked.
+
+**Consequences.**
+
+- ✅ #90's acceptance shape holds in steady state: invalid CRs are rejected at apply time with field-level errors; zero-match selectors are accepted with a warning. e2e proof: `TestWebhookValidation` (waits for the gated `Fail` commit, then asserts one rejection per class and the warning-only path).
+- ✅ No new trust anchors, no cert-manager, no bricking: the failure mode of every bootstrap/rollout state is "webhook silently absent" (Ignore), never "CR writes blocked". `kubectl apply -k` resets heal within one resync, same as the APIService.
+- ⚠️ `failurePolicy: Fail` + our own CRs means the controller can block its operators' CR writes if all replicas are down *after* enforcement. Judged acceptable: 2 replicas, readiness-gated endpoints, and the failure is scoped to ollie's own CRDs (never core resources). Deleting the `ValidatingWebhookConfiguration` is the documented break-glass.
+- ⚠️ The Ignore→Fail transition means admission is *eventually* enforcing, not install-time enforcing. Anything admitted during bootstrap is validated only reactively (Conflict conditions). This is the deliberate trade against blocking CR writes with an unreachable webhook.
+- 📌 RBAC: controller gains `validatingwebhookconfigurations` get/update/patch, `resourceNames`-scoped to `ollie-webhook`. New cluster object: `ollie-webhook` (kustomize-managed); `ollie-controller` Service gains port 9443. #108/#109 field validations extend `validateCore` when those fields land.
+
+**Implemented in.** `v0.6/phase-2c-webhook`.
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.

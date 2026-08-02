@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -43,12 +44,14 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/gke-labs/in-cluster-observability/internal/ca"
 	v1alpha1 "github.com/gke-labs/in-cluster-observability/pkg/controller/api/v1alpha1"
 	cppb "github.com/gke-labs/in-cluster-observability/pkg/controller/pb/controlplane/v1"
 	"github.com/gke-labs/in-cluster-observability/pkg/controller/reconciler"
 	"github.com/gke-labs/in-cluster-observability/pkg/controller/stream"
+	olliewebhook "github.com/gke-labs/in-cluster-observability/pkg/controller/webhook"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -77,6 +80,19 @@ func main() {
 	caTLSPort := flag.Int("ca-tls-port", 6443, "query custom-metrics TLS port probed by the flip gate")
 	caAPIService := flag.String("ca-apiservice", "v1beta1.custom.metrics.k8s.io", "APIService whose caBundle the CA manager populates")
 	caServingLifetime := flag.Duration("ca-serving-lifetime", ca.ServingDefaultLifetime, "validity of issued query serving certs (renewed before expiry)")
+
+	// Validating admission webhook (ADR-0030, #90): served by every
+	// replica on :9443 with a CA-issued cert; the CA manager (leader)
+	// injects the caBundle into the ValidatingWebhookConfiguration and
+	// flips failurePolicy Ignore->Fail once every endpoint verifiably
+	// serves it.
+	enableWebhook := flag.Bool("enable-webhook", true, "serve the TrafficMonitor/ClusterTrafficPolicy validating admission webhook (ADR-0030)")
+	webhookPort := flag.Int("webhook-port", 9443, "TLS port for the validating admission webhook")
+	webhookCertFile := flag.String("webhook-cert-file", "/etc/ollie/tls/tls.crt", "PEM serving cert for the webhook, mounted from the ollie-webhook-serving Secret; hot-reloaded on rotation. Falls back to a self-signed bootstrap cert when absent (fresh install / dev).")
+	webhookKeyFile := flag.String("webhook-key-file", "/etc/ollie/tls/tls.key", "PEM serving key paired with --webhook-cert-file")
+	webhookHostnames := flag.String("webhook-hostnames", "ollie-controller.ollie-system.svc,ollie-controller.ollie-system.svc.cluster.local,localhost", "comma-separated DNS SANs for the self-signed bootstrap webhook cert")
+	caWebhookServingSecret := flag.String("ca-webhook-serving-secret", "ollie-webhook-serving", "Secret name for the webhook serving cert+key issued by the CA; empty disables issuance")
+	caWebhookConfiguration := flag.String("ca-webhook-configuration", "ollie-webhook", "ValidatingWebhookConfiguration whose caBundle/failurePolicy the CA manager commits; empty disables")
 	flag.Parse()
 
 	if *versionOnly {
@@ -99,7 +115,7 @@ func main() {
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
 	utilruntime.Must(v1alpha1.AddToScheme(s))
 
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	opts := ctrl.Options{
 		Scheme:                        s,
 		Metrics:                       metricsserver.Options{BindAddress: *metricsAddr},
 		HealthProbeBindAddress:        *probeAddr,
@@ -107,7 +123,26 @@ func main() {
 		LeaderElectionID:              *leaderElectionID,
 		LeaderElectionNamespace:       *leaderElectionNS,
 		LeaderElectionReleaseOnCancel: true,
-	})
+	}
+	if *enableWebhook {
+		// Same serving posture as every other ollie listener
+		// (ADR-0029): CA-issued keypair hot-reloaded, self-signed
+		// bootstrap fallback, never plaintext. The webhook stays
+		// harmless until the CA manager verifies the endpoints and
+		// enforces failurePolicy Fail.
+		servingTLS, tErr := ca.ServingTLSConfig(*webhookCertFile, *webhookKeyFile, "ollie-controller", strings.Split(*webhookHostnames, ","), slog.Default())
+		if tErr != nil {
+			fatalf("webhook serving TLS init: %v\n", tErr)
+		}
+		opts.WebhookServer = ctrlwebhook.NewServer(ctrlwebhook.Options{
+			Port: *webhookPort,
+			TLSOpts: []func(*tls.Config){func(c *tls.Config) {
+				c.GetCertificate = servingTLS.GetCertificate
+				c.MinVersion = servingTLS.MinVersion
+			}},
+		})
+	}
+	mgr, err := ctrl.NewManager(cfg, opts)
 	if err != nil {
 		fatalf("NewManager: %v\n", err)
 	}
@@ -137,6 +172,19 @@ func main() {
 		For(&corev1.Pod{}).
 		Complete(&reconciler.PodReconciler{Engine: engine}); err != nil {
 		fatalf("setup PodReconciler: %v\n", err)
+	}
+
+	if *enableWebhook {
+		if err := ctrl.NewWebhookManagedBy(mgr, &v1alpha1.TrafficMonitor{}).
+			WithCustomValidator(&olliewebhook.TrafficMonitorValidator{Client: mgr.GetClient()}).
+			Complete(); err != nil {
+			fatalf("setup TrafficMonitor webhook: %v\n", err)
+		}
+		if err := ctrl.NewWebhookManagedBy(mgr, &v1alpha1.ClusterTrafficPolicy{}).
+			WithCustomValidator(&olliewebhook.ClusterTrafficPolicyValidator{Client: mgr.GetClient()}).
+			Complete(); err != nil {
+			fatalf("setup ClusterTrafficPolicy webhook: %v\n", err)
+		}
 	}
 
 	// Self-managed CA manager (ADR-0028). Runs only on the elected
@@ -170,6 +218,15 @@ func main() {
 			AgentServingDNSNames: servingDNSNames(*caAgentService, ns),
 			Logger:               slog.New(slog.NewTextHandler(os.Stderr, nil)).With("component", "ca-manager"),
 		}
+		if *enableWebhook && *caWebhookServingSecret != "" {
+			caMgr.WebhookServingSecret = *caWebhookServingSecret
+			caMgr.WebhookServingDNSNames = servingDNSNames("ollie-controller", ns)
+			caMgr.WebhookService = "ollie-controller"
+			caMgr.WebhookPort = *webhookPort
+			if *caWebhookConfiguration != "" {
+				caMgr.Webhook = ca.NewClientsetWebhookStore(clientset, *caWebhookConfiguration)
+			}
+		}
 		if aErr := mgr.Add(caMgr); aErr != nil {
 			fatalf("register CA manager: %v\n", aErr)
 		}
@@ -181,6 +238,15 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("ready", func(_ *http.Request) error { return nil }); err != nil {
 		fatalf("AddReadyzCheck: %v\n", err)
+	}
+	if *enableWebhook {
+		// Gate pod readiness on the webhook listener: once the CA
+		// manager enforces failurePolicy Fail, a replica that receives
+		// admission traffic before its server is up would fail CR
+		// writes.
+		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			fatalf("AddReadyzCheck webhook: %v\n", err)
+		}
 	}
 
 	// gRPC AgentSession server. Only the leader accepts streams;

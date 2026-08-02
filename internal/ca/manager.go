@@ -65,6 +65,18 @@ type Manager struct {
 	AgentServingSecret   string
 	AgentServingDNSNames []string
 
+	// Validating-webhook wiring (ADR-0030/#90): a third serving cert
+	// for the controller's :9443 admission endpoint, plus a gated
+	// commit that injects the caBundle into the
+	// ValidatingWebhookConfiguration and flips failurePolicy
+	// Ignore→Fail once every webhook endpoint serves the CA cert.
+	// Empty WebhookServingSecret disables all of it.
+	WebhookServingSecret   string
+	WebhookServingDNSNames []string
+	Webhook                WebhookStore // nil disables the caBundle/failurePolicy commit
+	WebhookService         string       // Service backing the webhook, e.g. ollie-controller
+	WebhookPort            int          // webhook TLS port, e.g. 9443
+
 	CALifetime      time.Duration
 	ServingLifetime time.Duration
 	RenewBefore     time.Duration // re-issue serving cert this long before expiry
@@ -122,9 +134,69 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			return fmt.Errorf("ensure agent serving cert: %w", err)
 		}
 	}
+	if m.WebhookServingSecret != "" {
+		if err := m.ensureServingCert(ctx, authority, m.WebhookServingSecret, m.WebhookServingDNSNames, "controller"); err != nil {
+			return fmt.Errorf("ensure webhook serving cert: %w", err)
+		}
+	}
 	if err := m.reconcileAPIService(ctx, authority); err != nil {
 		return fmt.Errorf("reconcile APIService: %w", err)
 	}
+	if err := m.reconcileWebhook(ctx, authority); err != nil {
+		return fmt.Errorf("reconcile webhook configuration: %w", err)
+	}
+	return nil
+}
+
+// reconcileWebhook drives the ValidatingWebhookConfiguration to the
+// enforced target state (caBundle=CA, failurePolicy=Fail) in one
+// commit, gated exactly like the APIService: only after every ready
+// webhook endpoint presents a leaf chaining to the CA. Until then the
+// manifest's bootstrap posture (empty caBundle + failurePolicy Ignore)
+// stays — an unreachable or unverifiable webhook must never block CR
+// writes; the reconciler's reactive Conflict conditions still cover
+// that window. A `kubectl apply -k` resets the bootstrap posture and
+// this heals it within a resync.
+func (m *Manager) reconcileWebhook(ctx context.Context, authority *CA) error {
+	if m.Webhook == nil {
+		return nil
+	}
+	desired := authority.CertPEM()
+	converged, err := m.Webhook.Get(ctx, desired)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// Manifest not applied (webhook opted out); nothing to do.
+			return nil
+		}
+		return err
+	}
+	if converged {
+		return nil
+	}
+	addrs, err := m.readyEndpoints(ctx, m.WebhookService, m.WebhookPort)
+	if err != nil {
+		return err
+	}
+	if len(addrs) == 0 {
+		m.log().Info("webhook gate: no ready webhook endpoints yet; leaving bootstrap posture (failurePolicy=Ignore)")
+		return nil
+	}
+	now := m.clock()
+	for _, addr := range addrs {
+		leaf, pErr := m.probe(ctx, addr)
+		if pErr != nil {
+			m.log().Info("webhook gate: endpoint not probeable yet", "addr", addr, "err", pErr)
+			return nil
+		}
+		if vErr := VerifyServedBy(leaf, desired, "", now); vErr != nil {
+			m.log().Info("webhook gate: endpoint still serving a non-CA cert", "addr", addr, "err", vErr)
+			return nil
+		}
+	}
+	if err := m.Webhook.Commit(ctx, desired); err != nil {
+		return err
+	}
+	m.log().Info("all webhook endpoints serve the self-managed CA; committed caBundle and enforced failurePolicy=Fail", "endpoints", len(addrs))
 	return nil
 }
 
@@ -262,7 +334,7 @@ func (m *Manager) reconcileAPIService(ctx context.Context, authority *CA) error 
 	if !insecure && string(curBundle) == string(desired) {
 		return nil // already in the verified-TLS target state
 	}
-	addrs, err := m.readyEndpoints(ctx)
+	addrs, err := m.readyEndpoints(ctx, m.QueryService, m.TLSPort)
 	if err != nil {
 		return err
 	}
@@ -289,10 +361,9 @@ func (m *Manager) reconcileAPIService(ctx context.Context, authority *CA) error 
 	return nil
 }
 
-// readyEndpoints lists the ready pod addresses backing the query Service
-// on the TLS port.
-func (m *Manager) readyEndpoints(ctx context.Context) ([]string, error) {
-	ep, err := m.Clientset.CoreV1().Endpoints(m.Namespace).Get(ctx, m.QueryService, metav1.GetOptions{})
+// readyEndpoints lists the ready pod addresses backing service on port.
+func (m *Manager) readyEndpoints(ctx context.Context, service string, port int) ([]string, error) {
+	ep, err := m.Clientset.CoreV1().Endpoints(m.Namespace).Get(ctx, service, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -302,7 +373,7 @@ func (m *Manager) readyEndpoints(ctx context.Context) ([]string, error) {
 	var addrs []string
 	for _, sub := range ep.Subsets {
 		for _, a := range sub.Addresses { // ready addresses only
-			addrs = append(addrs, net.JoinHostPort(a.IP, fmt.Sprintf("%d", m.TLSPort)))
+			addrs = append(addrs, net.JoinHostPort(a.IP, fmt.Sprintf("%d", port)))
 		}
 	}
 	return addrs, nil

@@ -53,6 +53,10 @@ spec:
               containerPort: 9101
             - name: stream
               containerPort: 9102
+            # Validating admission webhook (ADR-0030), TLS from the
+            # self-managed CA via the serving-cert mount below.
+            - name: webhook
+              containerPort: 9443
           livenessProbe:
             httpGet: { path: /healthz, port: healthz }
             initialDelaySeconds: 15
@@ -75,6 +79,22 @@ spec:
             runAsUser: 65532
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            # CA-issued webhook serving cert (ADR-0030), created by the
+            # leader's CA manager. optional:true so the controller
+            # starts before its own leader has issued it — the webhook
+            # serves a self-signed bootstrap cert (harmless while the
+            # ValidatingWebhookConfiguration is still failurePolicy
+            # Ignore with no caBundle) until kubelet mounts the real
+            # one.
+            - name: webhook-cert
+              mountPath: /etc/ollie/tls
+              readOnly: true
+      volumes:
+        - name: webhook-cert
+          secret:
+            secretName: ollie-webhook-serving
+            optional: true
 ---
 # ClusterIP Service for the gRPC stream. Agents resolve
 # ollie-controller.ollie-system.svc.cluster.local:9102 to dial in.
@@ -96,6 +116,9 @@ spec:
     app.kubernetes.io/name: ollie
     app.kubernetes.io/component: controller
   ports:
+    - name: webhook
+      port: 9443
+      targetPort: webhook
     - name: stream
       port: 9102
       targetPort: stream
