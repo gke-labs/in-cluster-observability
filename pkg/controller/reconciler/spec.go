@@ -24,11 +24,15 @@ import (
 	cppb "github.com/gke-labs/in-cluster-observability/pkg/controller/pb/controlplane/v1"
 )
 
-// Protocol bitset values (must match capture.Module on the agent
-// side). See pkg/capture/manager.go for the canonical numeric values.
+// Protocol bitset values. Each bit position mirrors the ordering of
+// the capture.Module enum on the agent side (see pkg/capture/manager.go).
+// Bit 1<<2 is reserved for HTTP/2, which is not independently
+// selectable — OBI captures h2c under the HTTP toggle and does not
+// label protocol version (ADR-0031) — so no ProtocolHTTP2 is defined.
 const (
 	ProtocolL4TCP uint32 = 1 << 0 // capture.ModuleL4TCP
 	ProtocolHTTP1 uint32 = 1 << 1 // capture.ModuleHTTP1
+	ProtocolGRPC  uint32 = 1 << 3 // capture.ModuleGRPC (1<<2 reserved for HTTP/2)
 )
 
 // ComputeSpec builds the MonitoringSpec for a pod given the set of
@@ -53,6 +57,16 @@ func ComputeSpec(pod *corev1.Pod, tms []*v1alpha1.TrafficMonitor, ctps []*v1alph
 	if covering.Protocols.HTTP != nil && covering.Protocols.HTTP.Enabled {
 		protocols |= ProtocolHTTP1
 		for _, p := range covering.Protocols.HTTP.Ports {
+			httpPorts[p] = struct{}{}
+		}
+	}
+	if covering.Protocols.GRPC != nil && covering.Protocols.GRPC.Enabled {
+		protocols |= ProtocolGRPC
+		// gRPC and HTTP share the L7 port set on the wire: OBI attaches
+		// uprobes per port and detects gRPC vs plaintext HTTP from the
+		// content-type, not the port (ADR-0031). So gRPC ports fold into
+		// the same instrumented-port set carried as HttpPorts.
+		for _, p := range covering.Protocols.GRPC.Ports {
 			httpPorts[p] = struct{}{}
 		}
 	}

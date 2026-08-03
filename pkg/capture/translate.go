@@ -65,11 +65,19 @@ func TranslateMetrics(rms []*metricspb.ResourceMetrics) []Event {
 
 // classifyMetric maps an OBI metric name to a capture.Module. The
 // mapping is heuristic — OBI's metric naming follows OTel semconv
-// (which the contract tests in #74 will validate against real OBI
-// output). Unknown names fall through to ModuleL4TCP since that's
-// the metric-only module in v0.2; HTTP metrics also classify here.
+// (which the contract tests validate against real OBI output).
+// Unknown names fall through to ModuleL4TCP since that's the
+// metric-only module in v0.2; HTTP and gRPC metrics classify here.
+//
+// gRPC surfaces under OBI's rpc.* metric family (rpc.server.call.duration
+// / rpc.client.call.duration and their Prometheus underscore forms);
+// OBI only emits rpc.* for gRPC (ADR-0031), so the rpc prefix is a
+// reliable gRPC discriminator.
 func classifyMetric(name string) Module {
 	switch {
+	case strings.HasPrefix(name, "rpc."), strings.HasPrefix(name, "rpc_"),
+		strings.Contains(name, ".rpc."), strings.Contains(name, "_rpc_"):
+		return ModuleGRPC
 	case strings.HasPrefix(name, "http."), strings.HasPrefix(name, "http_"),
 		strings.Contains(name, ".http."), strings.Contains(name, "_http_"):
 		return ModuleHTTP1

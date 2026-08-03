@@ -122,11 +122,47 @@ spec:
                   warning (not a rejection) per ADR-0030 §3 — a no-op spec is valid
                   and simply monitors nothing.
                 properties:
+                  grpc:
+                    description: |-
+                      GRPC enables gRPC capture. gRPC rides HTTP/2 but OBI attributes
+                      it distinctly — its own rpc.* metrics and spans — so it is a
+                      separate toggle from HTTP (#105, ADR-0031). Ports carry the same
+                      semantics as HTTP (server ports OBI attaches L7 uprobes to); OBI
+                      detects gRPC vs plaintext HTTP from the wire (content-type), not
+                      the port, so a port serving both is fine. TLS-wrapped gRPC is
+                      decrypted automatically.
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled gates the entire gRPC path. Default true.
+                        type: boolean
+                      ports:
+                        description: |-
+                          Ports is the list of TCP ports to instrument. If a matched pod's
+                          process opens one of these ports, OBI attaches L7 uprobes and
+                          classifies gRPC traffic distinctly from plaintext HTTP. Empty
+                          defaults to common gRPC ports at the controller. Each port must
+                          be in [1, 65535] — enforced by the CRD schema so an out-of-range
+                          port is rejected even during the webhook's failurePolicy=Ignore
+                          bootstrap window.
+                        items:
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        maxItems: 64
+                        minItems: 0
+                        type: array
+                    type: object
                   http:
                     description: |-
-                      HTTP enables HTTP/1.1 capture via OBI's Application mode
+                      HTTP enables plaintext HTTP capture via OBI's Application mode
                       (uprobe attach to processes listening on the configured ports).
-                      HTTP/2 and gRPC support arrive in v0.6 (#104, #105).
+                      This covers both HTTP/1.1 and cleartext HTTP/2 (h2c): OBI does
+                      not label HTTP protocol version, so the two are captured
+                      identically under this toggle (ADR-0031). TLS-wrapped HTTP is
+                      decrypted automatically (Go crypto/tls + OpenSSL uprobes) and
+                      surfaces here too — no separate toggle.
                     properties:
                       enabled:
                         default: true

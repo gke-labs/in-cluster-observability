@@ -58,30 +58,43 @@ func validateCore(path *field.Path, core v1alpha1.MonitoringSpecCore) (admission
 	var errs field.ErrorList
 
 	httpEnabled := core.Protocols.HTTP != nil && core.Protocols.HTTP.Enabled
+	grpcEnabled := core.Protocols.GRPC != nil && core.Protocols.GRPC.Enabled
 	l4Enabled := core.Protocols.L4 != nil && core.Protocols.L4.Enabled
-	if !httpEnabled && !l4Enabled {
-		warnings = append(warnings, "no protocol is enabled (protocols.l4/protocols.http); this monitor selects pods but captures nothing")
+	if !httpEnabled && !grpcEnabled && !l4Enabled {
+		warnings = append(warnings, "no protocol is enabled (protocols.l4/protocols.http/protocols.grpc); this monitor selects pods but captures nothing")
 	}
 
 	if core.Protocols.HTTP != nil {
-		portsPath := path.Child("protocols", "http", "ports")
-		seen := map[int32]bool{}
-		for i, p := range core.Protocols.HTTP.Ports {
-			if p < 1 || p > 65535 {
-				errs = append(errs, field.Invalid(portsPath.Index(i), p, "port must be in 1-65535"))
-				continue
-			}
-			if seen[p] {
-				errs = append(errs, field.Duplicate(portsPath.Index(i), p))
-			}
-			seen[p] = true
-		}
-		if len(core.Protocols.HTTP.Ports) > 0 && !core.Protocols.HTTP.Enabled {
-			warnings = append(warnings, "protocols.http.ports is set but protocols.http.enabled is false; the ports have no effect")
-		}
+		validatePorts(path.Child("protocols", "http"), "http", core.Protocols.HTTP.Ports, core.Protocols.HTTP.Enabled, &warnings, &errs)
+	}
+	if core.Protocols.GRPC != nil {
+		validatePorts(path.Child("protocols", "grpc"), "grpc", core.Protocols.GRPC.Ports, core.Protocols.GRPC.Enabled, &warnings, &errs)
 	}
 
 	return warnings, errs
+}
+
+// validatePorts checks an L7 protocol's port list: each port in
+// [1,65535], no duplicates, and a warning if ports are set while the
+// protocol is disabled. The CRD schema enforces the range too; the
+// webhook re-checks it for a clear message and to cover the
+// failurePolicy=Ignore bootstrap window (Phase 2 review #2).
+func validatePorts(protoPath *field.Path, proto string, ports []int32, enabled bool, warnings *admission.Warnings, errs *field.ErrorList) {
+	portsPath := protoPath.Child("ports")
+	seen := map[int32]bool{}
+	for i, p := range ports {
+		if p < 1 || p > 65535 {
+			*errs = append(*errs, field.Invalid(portsPath.Index(i), p, "port must be in 1-65535"))
+			continue
+		}
+		if seen[p] {
+			*errs = append(*errs, field.Duplicate(portsPath.Index(i), p))
+		}
+		seen[p] = true
+	}
+	if len(ports) > 0 && !enabled {
+		*warnings = append(*warnings, fmt.Sprintf("protocols.%s.ports is set but protocols.%s.enabled is false; the ports have no effect", proto, proto))
+	}
 }
 
 // compileSelector converts a LabelSelector, recording a field error on

@@ -44,12 +44,27 @@ type ProtocolSet struct {
 	// +optional
 	L4 *L4Config `json:"l4,omitempty"`
 
-	// HTTP enables HTTP/1.1 capture via OBI's Application mode
+	// HTTP enables plaintext HTTP capture via OBI's Application mode
 	// (uprobe attach to processes listening on the configured ports).
-	// HTTP/2 and gRPC support arrive in v0.6 (#104, #105).
+	// This covers both HTTP/1.1 and cleartext HTTP/2 (h2c): OBI does
+	// not label HTTP protocol version, so the two are captured
+	// identically under this toggle (ADR-0031). TLS-wrapped HTTP is
+	// decrypted automatically (Go crypto/tls + OpenSSL uprobes) and
+	// surfaces here too — no separate toggle.
 	//
 	// +optional
 	HTTP *HTTPConfig `json:"http,omitempty"`
+
+	// GRPC enables gRPC capture. gRPC rides HTTP/2 but OBI attributes
+	// it distinctly — its own rpc.* metrics and spans — so it is a
+	// separate toggle from HTTP (#105, ADR-0031). Ports carry the same
+	// semantics as HTTP (server ports OBI attaches L7 uprobes to); OBI
+	// detects gRPC vs plaintext HTTP from the wire (content-type), not
+	// the port, so a port serving both is fine. TLS-wrapped gRPC is
+	// decrypted automatically.
+	//
+	// +optional
+	GRPC *GRPCConfig `json:"grpc,omitempty"`
 }
 
 // L4Config configures L4 TCP capture.
@@ -76,6 +91,33 @@ type HTTPConfig struct {
 	// the CRD schema so an out-of-range port is rejected even during
 	// the webhook's failurePolicy=Ignore bootstrap window (the webhook
 	// re-checks the same bound for a clear message).
+	//
+	// +kubebuilder:validation:MinItems=0
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:Minimum=1
+	// +kubebuilder:validation:items:Maximum=65535
+	// +optional
+	Ports []int32 `json:"ports,omitempty"`
+}
+
+// GRPCConfig configures gRPC capture. Structurally identical to
+// HTTPConfig today (enable flag + instrumented ports); kept as its own
+// type so the two protocols can diverge without a breaking schema
+// change (e.g. gRPC-only reflection or streaming knobs later).
+type GRPCConfig struct {
+	// Enabled gates the entire gRPC path. Default true.
+	//
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled"`
+
+	// Ports is the list of TCP ports to instrument. If a matched pod's
+	// process opens one of these ports, OBI attaches L7 uprobes and
+	// classifies gRPC traffic distinctly from plaintext HTTP. Empty
+	// defaults to common gRPC ports at the controller. Each port must
+	// be in [1, 65535] — enforced by the CRD schema so an out-of-range
+	// port is rejected even during the webhook's failurePolicy=Ignore
+	// bootstrap window.
 	//
 	// +kubebuilder:validation:MinItems=0
 	// +kubebuilder:validation:MaxItems=64

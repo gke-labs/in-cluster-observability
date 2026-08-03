@@ -221,17 +221,23 @@ Per [`obi-integration.md`](obi-integration.md) §5, the agent exposes the OBI-su
 |---|---|---|
 | L4 TCP bytes/conns/rtt/retransmits | ✅ | OBI L4 |
 | L4 timing signals (time-to-first-byte) as latency proxy | ✅ | OBI L4 |
-| HTTP/1.1 requests + latencies | ✅ | OBI HTTP |
-| HTTP/2 requests + latencies | ✅ | OBI HTTP |
-| gRPC requests + latencies + status codes | ✅ | OBI gRPC |
+| HTTP/1.1 requests + latencies | ✅ | OBI HTTP (`protocols.http`) |
+| HTTP/2 (h2c) requests + latencies | ✅ ¹ | OBI HTTP (`protocols.http`) |
+| gRPC requests + latencies + status codes | ✅ ² | OBI gRPC (`protocols.grpc`) |
 | A2A (captured as HTTP) | ✅ | OBI HTTP; semantic layer roadmap |
-| TLS — Go `crypto/tls` | ✅ | OBI uprobes |
-| TLS — OpenSSL | ✅ | OBI uprobes |
-| TLS — BoringSSL | ⚠️ limited | OBI partial |
+| TLS — Go `crypto/tls` | ✅ ³ | OBI uprobes (automatic) |
+| TLS — OpenSSL | ✅ ³ | OBI uprobes (automatic) |
+| TLS — BoringSSL | ⚠️ limited ³ | OBI partial (static-linked ⇒ no `libssl.so` to probe) |
 | TLS — rustls, NSS, Java JSSE | ❌ roadmap | See [`roadmap.md`](roadmap.md) |
 | Kafka | ❌ roadmap | OBI pending |
 | SQL (PostgreSQL/MySQL/MongoDB/Redis) | optional | OBI; not default-enabled in `ClusterTrafficPolicy` |
 | GenAI (OpenAI/Anthropic/Gemini) | ✅ | OBI; enables "AI agents calling AI agents" observability |
+
+Notes (see [ADR-0031](decisions.md#adr-0031-v06-phase-3-protocol-support-grpc-http2-tls) for detail):
+
+1. **HTTP/2 is captured but not distinguished from HTTP/1.1.** OBI v0.10.0 emits no HTTP protocol-version label (`network.protocol.version` is not attached to HTTP telemetry), so cleartext HTTP/2 (h2c) rides the same `protocols.http` toggle and surfaces as `http.*` metrics/spans identical in shape to HTTP/1.1. There is no separate `protocols.http2` toggle.
+2. **gRPC is a distinct toggle (`protocols.grpc`) and is cleanly separated** from plaintext HTTP/2: OBI detects `content-type: application/grpc` and emits `rpc.*` metrics (`rpc.server.call.duration`) and spans instead of `http.*`. The agent classifies these as `ModuleGRPC`. Attribute keys follow semconv v1.41.0: `rpc.system.name` (=`grpc`), `rpc.method` (the **full** path `/pkg.Service/Method` — OBI does not split service and method), and `rpc.response.status_code`. There is no `rpc.service` attribute.
+3. **TLS decryption is automatic** — no toggle. OBI's Go `crypto/tls` and OpenSSL (`libssl.so`) uprobes are always compiled in; TLS-wrapped HTTP/gRPC is decrypted and surfaces under the same `protocols.http` / `protocols.grpc` toggles. BoringSSL is typically statically linked into the app binary and exposes no `libssl.so` symbol to probe, so it is effectively unsupported unless dynamically linked with OpenSSL-compatible symbols.
 
 ### 4.1 Per-request and per-response latency
 

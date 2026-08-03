@@ -31,6 +31,11 @@ Commit the new fixtures + goldens **in the same PR as the OBI image-tag bump** (
 
 Recorded cases as of #151: `http1-recorded` (HTTP/1.1 server metrics), `l4-recorded` (network flow metrics), `traces-http1-recorded` (HTTP spans). The recorder (`record_test.go`) captures whichever export bodies match each case's classifier, so re-recording after an OBI bump picks up whatever shape the new image emits.
 
+## Synthetic cases pending a real recording
+
+- `grpc-basic` (traces) and `grpc-metric-basic` (metrics) are **synthetic** (`-seed`), added with #105. OBI v0.10.0 emits gRPC fine, but our recorder's workload (`DeployTestWorkload`, agnhost echo) speaks only HTTP — there is no gRPC server + client in the harness yet, so gRPC is "not yet recordable in our harness." The synthetic payloads use OBI's real semconv-v1.41.0 gRPC keys (`rpc.system.name`, `rpc.method` = full path, `rpc.response.status_code`) so the diff against a real recording is small (ADR-0031).
+- To replace with real recordings: add a gRPC echo workload + client to the e2e harness, add `grpc-recorded` / `traces-grpc-recorded` classifier entries to `record_test.go` (metric name `rpc.server.call.duration`; span carrying `rpc.system.name`), re-run `-record`, then delete the synthetic `grpc-basic` / `grpc-metric-basic` cases. This must run in CI/GKE (the sandbox cannot build the OBI image or run Kind).
+
 ## Adding a new case
 
 - Recorded: extend the `cases` map in `record_test.go` with a classifier, re-run `-record`.

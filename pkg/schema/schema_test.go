@@ -32,6 +32,10 @@ func TestForwardableLabel(t *testing.T) {
 		"http.route",
 		"network.protocol.name",
 		"tcp.connection.state",
+		// Low-sensitivity gRPC dimensions (#105, ADR-0031).
+		"rpc.method",
+		"rpc.response.status_code",
+		"rpc.system.name",
 	}
 	for _, k := range allowed {
 		if !ForwardableLabel(k) {

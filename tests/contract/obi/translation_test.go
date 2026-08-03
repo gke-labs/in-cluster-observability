@@ -95,6 +95,8 @@ func normalize(events []capture.Event) []goldenEvent {
 				Method:     ev.Span.Method,
 				Path:       ev.Span.Path,
 				StatusCode: ev.Span.StatusCode,
+				RPCMethod:  ev.Span.RPCMethod,
+				RPCStatus:  ev.Span.RPCStatus,
 				DurationNs: ev.Span.DurationNs,
 				Attributes: ev.Span.Attributes,
 			}

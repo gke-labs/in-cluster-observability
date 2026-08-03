@@ -53,6 +53,10 @@ func httpOn(ports ...int32) v1alpha1.ProtocolSet {
 	return v1alpha1.ProtocolSet{HTTP: &v1alpha1.HTTPConfig{Enabled: true, Ports: ports}}
 }
 
+func grpcOn(ports ...int32) v1alpha1.ProtocolSet {
+	return v1alpha1.ProtocolSet{GRPC: &v1alpha1.GRPCConfig{Enabled: true, Ports: ports}}
+}
+
 func pod(name, ns string, lbls map[string]string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: lbls}}
 }
@@ -97,6 +101,17 @@ func TestValidateCoreRejections(t *testing.T) {
 	if _, err := v.ValidateCreate(ctx, tm("ok", "ns", metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}}, httpOn(80, 8080))); err != nil {
 		t.Errorf("valid TrafficMonitor rejected: %v", err)
 	}
+
+	// gRPC ports get the same range/dup checks as HTTP (#105).
+	if _, err := v.ValidateCreate(ctx, tm("gdup", "ns", metav1.LabelSelector{}, grpcOn(9090, 9090))); err == nil {
+		t.Error("duplicate grpc ports accepted")
+	}
+	if _, err := v.ValidateCreate(ctx, tm("grange", "ns", metav1.LabelSelector{}, grpcOn(70000))); err == nil {
+		t.Error("out-of-range grpc port accepted")
+	}
+	if _, err := v.ValidateCreate(ctx, tm("gok", "ns", metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}}, grpcOn(9090))); err != nil {
+		t.Errorf("valid gRPC TrafficMonitor rejected: %v", err)
+	}
 }
 
 func TestValidateWarnings(t *testing.T) {
@@ -120,6 +135,16 @@ func TestValidateWarnings(t *testing.T) {
 	}
 	if !hasWarning(w, "no effect") {
 		t.Errorf("missing ports-without-enabled warning, got %v", w)
+	}
+
+	// gRPC ports set but grpc disabled: same warning on the grpc path.
+	w, err = v.ValidateCreate(ctx, tm("goff", "ns", metav1.LabelSelector{},
+		v1alpha1.ProtocolSet{GRPC: &v1alpha1.GRPCConfig{Enabled: false, Ports: []int32{9090}}}))
+	if err != nil {
+		t.Fatalf("disabled-grpc-with-ports rejected: %v", err)
+	}
+	if !hasWarning(w, "protocols.grpc.ports") {
+		t.Errorf("missing grpc ports-without-enabled warning, got %v", w)
 	}
 }
 

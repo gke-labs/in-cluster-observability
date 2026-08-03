@@ -86,7 +86,7 @@ func runControllerClient(ctx context.Context, addr, nodeName string, mgr capture
 		ControllerAddr:   addr,
 		NodeName:         nodeName,
 		AgentVersion:     version,
-		SupportedModules: []string{"l4_tcp", "http1"},
+		SupportedModules: []string{"l4_tcp", "http1", "grpc"},
 		Sink:             newCaptureSink(mgr),
 		Logf:             logf,
 	})

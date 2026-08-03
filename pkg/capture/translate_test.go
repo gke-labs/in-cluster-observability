@@ -142,6 +142,29 @@ func TestTranslateMetrics_HTTPClassification(t *testing.T) {
 	}
 }
 
+func TestTranslateMetrics_GRPCClassification(t *testing.T) {
+	// OBI's gRPC RED metrics use the rpc.* family (OTEL dotted and
+	// Prometheus underscore forms). Both must classify as ModuleGRPC,
+	// distinct from HTTP (ADR-0031).
+	rm := []*metricspb.ResourceMetrics{{
+		ScopeMetrics: []*metricspb.ScopeMetrics{{
+			Metrics: []*metricspb.Metric{
+				sumMetric("rpc.server.call.duration", 1),
+				gaugeMetric("rpc_client_call_duration_seconds", 0.05),
+			},
+		}},
+	}}
+	events := TranslateMetrics(rm)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events; got %d", len(events))
+	}
+	for _, ev := range events {
+		if ev.Module != ModuleGRPC {
+			t.Errorf("rpc-shaped metric name %q should classify as ModuleGRPC; got %v", ev.Metric.Name, ev.Module)
+		}
+	}
+}
+
 func TestTranslateMetrics_EmptyInput(t *testing.T) {
 	if got := TranslateMetrics(nil); len(got) != 0 {
 		t.Errorf("nil input should produce no events; got %d", len(got))

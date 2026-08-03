@@ -939,6 +939,41 @@ The single hard hazard is the transition. Dropping `insecureSkipTLSVerify` while
 
 ---
 
+## ADR-0031: v0.6 Phase 3 protocol support — gRPC, HTTP/2, TLS (#104–#107)
+
+**Status.** Accepted (2026-08-03).
+
+**Context.** Phase 3 of the v0.6 leg turns on the L7 protocols beyond HTTP/1.1: HTTP/2 (#104), gRPC (#105), and TLS decryption for Go `crypto/tls` (#106) and OpenSSL (#107). The issues were filed against assumptions about what the pinned OBI image emits — #104 wanted an `http_version=2`-labelled golden; #105 assumed semconv attributes `rpc.system`, `rpc.service`, and `rpc.grpc.status_code`. A source audit of OBI at the pinned `v0.10.0` tag (it pins `go.opentelemetry.io/otel/semconv/v1.41.0`) contradicted several of those assumptions, so the phase was re-scoped to match ground truth rather than the filed acceptance text.
+
+**Ground truth (OBI v0.10.0).**
+
+- **No HTTP protocol-version label.** OBI attaches no `network.protocol.version` (or any version key) to HTTP metrics or spans. Cleartext HTTP/2 (h2c) is therefore indistinguishable from HTTP/1.1 in the telemetry — the two produce identically-shaped `http.*` output.
+- **gRPC is cleanly separated from plaintext HTTP/2.** OBI detects `content-type: application/grpc` and emits a distinct event type: `rpc.*` metrics (`rpc.server.call.duration` / `rpc.client.call.duration`) and spans named for the full method path, not `http.*`.
+- **gRPC attribute keys are the newer semconv v1.41.0 forms:** `rpc.system.name` (=`"grpc"`), `rpc.method` (the **full** path `/pkg.Service/Method` — OBI does not split package/service/method), `rpc.response.status_code`. There is **no** `rpc.service` attribute, and the status key is **not** `rpc.grpc.status_code`.
+- **TLS decryption is automatic.** Go `crypto/tls` and OpenSSL (`libssl.so` uprobes) are unconditionally compiled into OBI; there is no enable flag. Decrypted L7 surfaces as ordinary `http.*` / `rpc.*`. BoringSSL is almost always static-linked into the app binary, exposing no `libssl.so` symbol to probe — effectively unsupported.
+- **Enablement axes.** `OTEL_EBPF_METRICS_FEATURES` selects telemetry categories (`application` = L7 RED); `OTEL_EBPF_*_INSTRUMENTATIONS` selects protocols (`http`, `grpc`; default `*`). The shipped DaemonSet already runs `application` with default instrumentations, so **no OBI/DaemonSet change is required** for any Phase 3 protocol.
+
+**Decision.**
+
+1. **HTTP/2 rides the existing `protocols.http` toggle; #104 reframed.** Since h2c is indistinguishable from HTTP/1.1, there is no separate `protocols.http2` CRD toggle and no version label. #104's acceptance is re-scoped from "tag `http_version=2`" to "h2c traffic is captured as `http.*` and gRPC-over-HTTP/2 is attributed distinctly as `rpc.*`."
+2. **gRPC is its own toggle and its own capture module.** `ProtocolSet.GRPC` (`GRPCConfig` = `enabled` + `ports`, structurally like HTTP but a separate type so the two can diverge later). The reconciler ORs `ProtocolGRPC` (bit `1<<3`; `1<<2` reserved for a hypothetical HTTP/2 that will never be independently selectable) and folds gRPC ports into the same wire port set as HTTP — OBI attaches uprobes per port and discriminates protocol from the wire, not the port, so one port serving both is fine and no new proto field is needed. The agent advertises the `grpc` module in `SupportedModules`.
+3. **Translation discriminates by RPC attributes, using the correct keys.** `TranslateTraces` classifies a span as `ModuleGRPC` when `rpc.system.name==\"grpc\"` (with `rpc.system` and bare `rpc.method` fallbacks) and promotes `rpc.method` → `SpanEvent.RPCMethod`, `rpc.response.status_code` → `SpanEvent.RPCStatus`; HTTP fields stay empty for gRPC. `classifyMetric` maps the `rpc.*` metric family → `ModuleGRPC`. The forwarder allowlist (`pkg/schema`) admits `rpc.method`, `rpc.response.status_code`, `rpc.system.name` — all low-cardinality, none sensitive.
+4. **TLS gets no toggle; it is a validation + docs deliverable.** #106/#107 add no capture code — TLS-decrypted traffic is already `http.*`/`rpc.*`. They are closed by e2e proof (Go `crypto/tls` server + nginx/OpenSSL) and the protocol matrix documenting automatic decrypt and BoringSSL's limitation.
+5. **gRPC contract fixtures start synthetic.** The recorder's workload (agnhost echo) speaks only HTTP, so gRPC is "not yet recordable in our harness." A `-seed` synthetic `grpc-basic`/`grpc-metric-basic` fixture (using the real semconv keys above) provides contract coverage now; real recordings replace it once a gRPC workload is added to the e2e harness (a CI/GKE step, per REGENERATE.md).
+
+**Consequences.**
+
+- ✅ #105 lands as real capture code with the correct semconv keys — dashboards/queries built on it will match what OBI actually emits, avoiding a silent "no data" from querying `rpc.grpc.status_code`/`rpc.service`.
+- ✅ No OBI image or DaemonSet change, so Phase 3 carries no re-record-the-world cost and no privilege delta (TLS uprobe caps already shipped in Phase 1).
+- ✅ gRPC-vs-HTTP separation is structural (distinct metric names + event type), not heuristic-on-port — robust to mixed-protocol ports.
+- ⚠️ Ollie cannot report HTTP protocol version until OBI emits one. If a user needs "HTTP/2 vs HTTP/1.1" breakdown, that is an upstream OBI ask, tracked as roadmap, not a v0.6 deliverable.
+- ⚠️ gRPC contract freeze is synthetic until the harness grows a gRPC workload; the unit tests in `pkg/capture` carry the translation guarantee in the interim.
+- 📌 BoringSSL users get no L7 decrypt; documented in the matrix as ⚠️ limited.
+
+**Implemented in.** `v0.6/phase-3-protocols`.
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0004 / ADR-0011** — superseded by ADR-0024 : extensibility moves from an importable Go library + in-process sink interfaces to wire protocols (OTLP push, streaming subscribe, scrape/remote-write). ADR-0004's `pkg/` vs `internal/` layout convention stands.

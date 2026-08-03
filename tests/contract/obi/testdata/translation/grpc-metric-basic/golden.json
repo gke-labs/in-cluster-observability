@@ -1,0 +1,16 @@
+[
+  {
+    "kind": "metric",
+    "module": "grpc",
+    "metric": {
+      "name": "rpc.server.call.duration",
+      "value": 3,
+      "attributes": {
+        "rpc.method": "/grpc.health.v1.Health/Check",
+        "rpc.response.status_code": "0",
+        "service.namespace": "shop"
+      },
+      "type": "sum"
+    }
+  }
+]

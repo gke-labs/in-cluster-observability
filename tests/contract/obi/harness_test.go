@@ -110,6 +110,8 @@ type goldenSpan struct {
 	Method     string            `json:"method,omitempty"`
 	Path       string            `json:"path,omitempty"`
 	StatusCode int               `json:"status_code,omitempty"`
+	RPCMethod  string            `json:"rpc_method,omitempty"`
+	RPCStatus  string            `json:"rpc_status,omitempty"`
 	DurationNs uint64            `json:"duration_ns,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }

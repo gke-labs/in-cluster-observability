@@ -115,6 +115,102 @@ func TestTranslateTraces_LegacySemconv(t *testing.T) {
 	}
 }
 
+func TestTranslateTraces_GRPC(t *testing.T) {
+	// OBI attributes gRPC distinctly from plaintext HTTP/2: the span
+	// carries rpc.* (semconv v1.41.0) and the span name is the full
+	// method path. It must classify as ModuleGRPC with the RPC fields
+	// promoted and the HTTP fields left empty (ADR-0031).
+	rs := []*tracepb.ResourceSpans{{
+		Resource: &resourcepb.Resource{
+			Attributes: []*commonpb.KeyValue{strKV("k8s.pod.name", "echo-server")},
+		},
+		ScopeSpans: []*tracepb.ScopeSpans{{
+			Spans: []*tracepb.Span{{
+				Name:              "/grpc.health.v1.Health/Check",
+				StartTimeUnixNano: 1_000_000_000,
+				EndTimeUnixNano:   1_003_000_000,
+				Attributes: []*commonpb.KeyValue{
+					strKV("rpc.system.name", "grpc"),
+					strKV("rpc.method", "/grpc.health.v1.Health/Check"),
+					strKV("rpc.response.status_code", "0"),
+				},
+			}},
+		}},
+	}}
+	events := TranslateTraces(rs)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event; got %d", len(events))
+	}
+	ev := events[0]
+	if ev.Module != ModuleGRPC {
+		t.Errorf("module = %v; want grpc", ev.Module)
+	}
+	se := ev.Span
+	if se.RPCMethod != "/grpc.health.v1.Health/Check" {
+		t.Errorf("RPCMethod = %q; want the full gRPC path", se.RPCMethod)
+	}
+	if se.RPCStatus != "0" {
+		t.Errorf("RPCStatus = %q; want 0", se.RPCStatus)
+	}
+	// HTTP-shaped fields must stay empty for gRPC.
+	if se.Method != "" || se.Path != "" || se.StatusCode != 0 {
+		t.Errorf("HTTP fields should be empty for gRPC; got Method=%q Path=%q Status=%d", se.Method, se.Path, se.StatusCode)
+	}
+	if se.DurationNs != 3_000_000 {
+		t.Errorf("DurationNs = %d; want 3_000_000", se.DurationNs)
+	}
+	if got := se.Attributes["k8s.pod.name"]; got != "echo-server" {
+		t.Errorf("k8s.pod.name should pass through; got %q", got)
+	}
+}
+
+func TestTranslateTraces_GRPCLegacyAndFallback(t *testing.T) {
+	// Older semconv uses rpc.system (not rpc.system.name) and
+	// rpc.grpc.status_code; and some OBI builds may set only rpc.method.
+	// Both must still classify as gRPC.
+	cases := []struct {
+		name       string
+		attrs      []*commonpb.KeyValue
+		wantStatus string
+	}{
+		{
+			name: "legacy-rpc-system",
+			attrs: []*commonpb.KeyValue{
+				strKV("rpc.system", "grpc"),
+				strKV("rpc.method", "/svc/M"),
+				strKV("rpc.grpc.status_code", "5"),
+			},
+			wantStatus: "5",
+		},
+		{
+			name: "method-only",
+			attrs: []*commonpb.KeyValue{
+				strKV("rpc.method", "/svc/M"),
+			},
+			wantStatus: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := []*tracepb.ResourceSpans{{
+				ScopeSpans: []*tracepb.ScopeSpans{{
+					Spans: []*tracepb.Span{{Name: "/svc/M", Attributes: tc.attrs}},
+				}},
+			}}
+			events := TranslateTraces(rs)
+			if len(events) != 1 {
+				t.Fatalf("expected 1 event; got %d", len(events))
+			}
+			if events[0].Module != ModuleGRPC {
+				t.Errorf("module = %v; want grpc", events[0].Module)
+			}
+			if got := events[0].Span.RPCStatus; got != tc.wantStatus {
+				t.Errorf("RPCStatus = %q; want %q", got, tc.wantStatus)
+			}
+		})
+	}
+}
+
 func TestTranslateTraces_NoDuration(t *testing.T) {
 	rs := []*tracepb.ResourceSpans{{
 		ScopeSpans: []*tracepb.ScopeSpans{{

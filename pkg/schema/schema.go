@@ -67,11 +67,21 @@ var (
 	// flow half-of-connection on obi.network.flow.bytes; without it the
 	// two directions carry identical labels and collapse to a single
 	// series, last-write-wins over a monotonic counter (#170 review).
+	//
+	// The rpc.* keys carry gRPC identity (#105, ADR-0031). rpc.method
+	// is the full gRPC path "/pkg.Service/Method" — bounded by the
+	// service's method surface, comparable to http.route in
+	// cardinality. rpc.response.status_code is the numeric gRPC status
+	// (0..16). rpc.system.name is effectively constant ("grpc"). None
+	// are high-sensitivity, so they are safe to forward.
 	ForwardAllowedLabelKeys = []string{
 		"http.request.method",
 		"http.response.status_code",
 		"http.route",
 		"direction",
+		"rpc.method",
+		"rpc.response.status_code",
+		"rpc.system.name",
 	}
 )
 

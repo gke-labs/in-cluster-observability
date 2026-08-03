@@ -130,9 +130,15 @@ OBI emits standard OTLP — `ExportMetricsServiceRequest` and `ExportTraceServic
 Per [ADR-0017.5](decisions.md#175-v02-metricspan-field-set--minimal-http-focused), v0.2 captures the **minimal** field set:
 
 - L4 TCP metrics → `Event{Kind: Metric, Metric: &MetricEvent{name, value, attrs: {peer_ip, peer_port, direction}}}`
-- HTTP/1.1 spans → `Event{Kind: Span, Span: &SpanEvent{method, path_raw, status, duration_ns, peer_ip, peer_port}}`
-- HTTP/1.1 metrics (counter, histogram) → `Event{Kind: Metric, ...}`
+- HTTP spans (HTTP/1.1 and h2c) → `Event{Kind: Span, Module: ModuleHTTP1, Span: &SpanEvent{method, path_raw, status, duration_ns, ...}}`
+- HTTP metrics (counter, histogram) → `Event{Kind: Metric, ...}`
 - Per [ADR-0017.4](decisions.md#174-strip-obis-built-in-kubernetes-attribution), v0.2 **dropped OBI's `k8s.*` resource attributes** at translation time. (Superseded by [ADR-0021](decisions.md#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment): OBI's native K8s attribution is now ON and passes through.)
+
+Phase 3 ([ADR-0031](decisions.md#adr-0031-v06-phase-3-protocol-support--grpc-http2-tls-104107)) adds gRPC discrimination:
+
+- gRPC spans → `Event{Kind: Span, Module: ModuleGRPC, Span: &SpanEvent{rpc_method, rpc_status, duration_ns, ...}}`. A span is gRPC when it carries OBI's `rpc.system.name="grpc"` (semconv v1.41.0); `rpc.method` (the full `/pkg.Service/Method` path) and `rpc.response.status_code` promote to `RPCMethod`/`RPCStatus`, and the HTTP fields stay empty.
+- gRPC metrics → `Event{Kind: Metric, Module: ModuleGRPC, ...}`, classified from the `rpc.*` metric family (`rpc.server.call.duration`).
+- HTTP protocol version is **not** observable (OBI emits no version label), so h2c and HTTP/1.1 both classify as `ModuleHTTP1`. TLS-decrypted HTTP/gRPC is automatic and needs no distinct handling — it arrives as ordinary `http.*`/`rpc.*`.
 
 The translation lives in `pkg/capture/otlp_translate.go`; tested via contract tests (§6).
 

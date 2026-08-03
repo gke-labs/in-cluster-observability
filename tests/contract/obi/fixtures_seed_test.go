@@ -79,6 +79,55 @@ func TestSeedFixtures(t *testing.T) {
 				}},
 			}},
 		})
+
+	// gRPC basic: one unary-call span. OBI v0.10.0 attributes gRPC with
+	// semconv v1.41.0 rpc.* keys (rpc.system.name="grpc", rpc.method =
+	// the full path, rpc.response.status_code); the span name is the
+	// full method path. This must translate to a ModuleGRPC span with
+	// the RPC fields promoted and no HTTP fields (ADR-0031). Synthetic
+	// until a real OBI recording replaces it (REGENERATE.md, #105).
+	writeBinpb(t, filepath.Join("testdata", "translation", "grpc-basic"), "traces",
+		&colltracepb.ExportTraceServiceRequest{
+			ResourceSpans: []*tracepb.ResourceSpans{{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						strKV("service.namespace", "shop"),
+						strKV("k8s.pod.name", "echo-0"),
+					},
+				},
+				ScopeSpans: []*tracepb.ScopeSpans{{
+					Spans: []*tracepb.Span{{
+						Name:              "/grpc.health.v1.Health/Check",
+						StartTimeUnixNano: 1_000_000_000,
+						EndTimeUnixNano:   1_003_000_000,
+						Attributes: []*commonpb.KeyValue{
+							strKV("rpc.system.name", "grpc"),
+							strKV("rpc.method", "/grpc.health.v1.Health/Check"),
+							strKV("rpc.response.status_code", "0"),
+						},
+					}},
+				}},
+			}},
+		})
+
+	// gRPC RED metric: server call duration histogram-free stand-in
+	// (a Sum is enough to exercise classifyMetric → ModuleGRPC). The
+	// real OBI recording emits rpc.server.call.duration as a histogram.
+	writeBinpb(t, filepath.Join("testdata", "translation", "grpc-metric-basic"), "metrics",
+		&collmetricspb.ExportMetricsServiceRequest{
+			ResourceMetrics: []*metricspb.ResourceMetrics{{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{strKV("service.namespace", "shop")},
+				},
+				ScopeMetrics: []*metricspb.ScopeMetrics{{
+					Metrics: []*metricspb.Metric{
+						sumIntMetric("rpc.server.call.duration", 3,
+							strKV("rpc.method", "/grpc.health.v1.Health/Check"),
+							strKV("rpc.response.status_code", "0")),
+					},
+				}},
+			}},
+		})
 }
 
 // strKV / sumIntMetric are local to the test package; they mirror the

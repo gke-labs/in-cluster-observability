@@ -357,22 +357,38 @@ type MetricEvent struct {
 }
 
 // SpanEvent carries a single translated OTel-shaped span from OBI's
-// L7 capture (HTTP/1.1 in v0.2). Per ADR-0017.5, field set is
-// minimal — full OTel span model (attribute soup + events + links)
-// arrives in v0.3.
+// L7 capture. The event's Module discriminates the protocol:
+// ModuleHTTP1 for plaintext HTTP (both HTTP/1.1 and h2c — OBI v0.10.0
+// does not label HTTP protocol version, so the two are
+// indistinguishable here, see ADR-0031) and ModuleGRPC for gRPC. The
+// HTTP fields (Method/Path/StatusCode) populate for HTTP spans; the
+// RPC fields (RPCMethod/RPCStatus) populate for gRPC spans. Per
+// ADR-0017.5 the field set is minimal — the full OTel span model
+// (attribute soup + events + links) is deferred; the raw attribute
+// map below carries anything not promoted to a typed field.
 //
 // Stability: Experimental
 type SpanEvent struct {
 	// Name is the span name as emitted by OBI (typically the OTel
-	// semconv form, e.g. "GET /users/{id}" or "GET").
+	// semconv form, e.g. "GET /users/{id}" or "GET" for HTTP; the
+	// full gRPC path "/pkg.Service/Method" for gRPC).
 	Name string
-	// Method is the HTTP method (GET, POST, ...).
+	// Method is the HTTP method (GET, POST, ...). Empty for gRPC.
 	Method string
 	// Path is the raw, untemplated URL path. Templating arrives in
-	// v0.6 (#108).
+	// v0.6 (#108). Empty for gRPC (the method path rides RPCMethod).
 	Path string
-	// StatusCode is the HTTP response status (0 if unknown).
+	// StatusCode is the HTTP response status (0 if unknown / gRPC).
 	StatusCode int
+	// RPCMethod is the full gRPC method path (e.g.
+	// "/pkg.Service/Method") for gRPC spans; "" for HTTP. Sourced from
+	// OBI's rpc.method attribute — semconv v1.41.0 does not split
+	// service and method, so the whole path lands here (ADR-0031).
+	RPCMethod string
+	// RPCStatus is the gRPC response status code (semconv
+	// rpc.response.status_code, a numeric gRPC status rendered as a
+	// string) for gRPC spans; "" for HTTP.
+	RPCStatus string
 	// DurationNs is the span duration in nanoseconds.
 	DurationNs uint64
 	// Attributes is the merged set of resource + span attributes.

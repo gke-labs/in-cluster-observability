@@ -176,6 +176,52 @@ func TestComputeSpec_ProtocolsBitset(t *testing.T) {
 	}
 }
 
+// TestComputeSpec_GRPCBitsetAndPorts confirms the gRPC toggle ORs
+// ProtocolGRPC and folds its ports into the shared L7 port set
+// (HttpPorts), deduped and sorted alongside HTTP ports (ADR-0031).
+func TestComputeSpec_GRPCBitsetAndPorts(t *testing.T) {
+	p := pod("u8", "echo-1", "demo", "node-a", map[string]string{"app": "echo"})
+	t1 := tm("l7", "demo", map[string]string{"app": "echo"}, v1alpha1.MonitoringSpecCore{
+		Protocols: v1alpha1.ProtocolSet{
+			L4:   &v1alpha1.L4Config{Enabled: true},
+			HTTP: &v1alpha1.HTTPConfig{Enabled: true, Ports: []int32{8080}},
+			GRPC: &v1alpha1.GRPCConfig{Enabled: true, Ports: []int32{9090, 8080}},
+		},
+	})
+	got := reconciler.ComputeSpec(p, []*v1alpha1.TrafficMonitor{t1}, nil)
+	if got == nil {
+		t.Fatal("expected a spec")
+	}
+	want := reconciler.ProtocolL4TCP | reconciler.ProtocolHTTP1 | reconciler.ProtocolGRPC
+	if got.GetProtocols() != want {
+		t.Errorf("Protocols bitset = %b; want %b", got.GetProtocols(), want)
+	}
+	// 8080 appears in both HTTP and gRPC; must dedupe. Result sorted.
+	if wantPorts := []uint32{8080, 9090}; len(got.GetHttpPorts()) != 2 ||
+		got.GetHttpPorts()[0] != wantPorts[0] || got.GetHttpPorts()[1] != wantPorts[1] {
+		t.Errorf("HttpPorts = %v; want %v (HTTP+gRPC merged, deduped, sorted)", got.GetHttpPorts(), wantPorts)
+	}
+}
+
+// TestComputeSpec_GRPCOnly confirms a gRPC-only monitor produces a
+// spec (regression against the "no protocol enabled → nil" guard
+// forgetting gRPC).
+func TestComputeSpec_GRPCOnly(t *testing.T) {
+	p := pod("u9", "echo-2", "demo", "node-a", map[string]string{"app": "echo"})
+	t1 := tm("grpc-only", "demo", map[string]string{"app": "echo"}, v1alpha1.MonitoringSpecCore{
+		Protocols: v1alpha1.ProtocolSet{
+			GRPC: &v1alpha1.GRPCConfig{Enabled: true, Ports: []int32{9090}},
+		},
+	})
+	got := reconciler.ComputeSpec(p, []*v1alpha1.TrafficMonitor{t1}, nil)
+	if got == nil {
+		t.Fatal("expected a spec for a gRPC-only monitor")
+	}
+	if got.GetProtocols() != reconciler.ProtocolGRPC {
+		t.Errorf("Protocols bitset = %b; want %b (grpc only)", got.GetProtocols(), reconciler.ProtocolGRPC)
+	}
+}
+
 // Aid for reading the test: confirm we use the proto types defined
 // in pkg/controller/pb/controlplane/v1 (catches accidental import
 // drift if the proto regenerates to a new path).
