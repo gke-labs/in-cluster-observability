@@ -20,7 +20,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -31,9 +33,13 @@ type fakeAPIService struct {
 	caBundle    []byte
 	insecure    bool
 	commitCalls int
+	getErr      error // if set, Get returns it (e.g. a NotFound)
 }
 
 func (f *fakeAPIService) Get(context.Context) ([]byte, bool, error) {
+	if f.getErr != nil {
+		return nil, false, f.getErr
+	}
 	return f.caBundle, f.insecure, nil
 }
 func (f *fakeAPIService) Commit(_ context.Context, ca []byte) error {
@@ -329,6 +335,41 @@ func (f *fakeWebhookStore) Commit(_ context.Context, caPEM []byte) error {
 	f.enforced = true
 	f.commitCalls++
 	return nil
+}
+
+// A missing custom-metrics APIService (Get returns NotFound) must not
+// starve the webhook gate: the two reconcilers are independent, so a
+// full Reconcile pass still verifies and commits the webhook flip.
+// Regression for the Phase 2 review finding (asymmetric NotFound
+// handling + first-error abort left the webhook stuck at Ignore).
+func TestReconcileWebhookSurvivesMissingAPIService(t *testing.T) {
+	m, cs, api := newManager(t)
+	api.getErr = apierrors.NewNotFound(
+		schema.GroupResource{Group: "apiregistration.k8s.io", Resource: "apiservices"},
+		"v1beta1.custom.metrics.k8s.io")
+	wh := &fakeWebhookStore{}
+	m.Webhook = wh
+	m.WebhookService = "ollie-controller"
+	m.WebhookPort = 9443
+	ctx := context.Background()
+	authority, _ := m.ensureCA(ctx)
+
+	goodPEM, _, _ := authority.IssueServingCert(testDNS, time.Now(), ServingDefaultLifetime)
+	goodDER, _ := decodePEM(goodPEM, "CERTIFICATE")
+	seedServiceEndpoints(t, cs, "ollie-controller", "10.0.1.1")
+	m.probeLeaf = func(_ context.Context, _ string) ([]byte, error) { return goodDER, nil }
+
+	// Full pass: APIService Get returns NotFound, but Reconcile must not
+	// error out and must still commit the webhook flip.
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile with missing APIService: %v", err)
+	}
+	if api.commitCalls != 0 {
+		t.Fatalf("committed a missing APIService (%d calls)", api.commitCalls)
+	}
+	if !wh.enforced || wh.commitCalls != 1 {
+		t.Fatalf("webhook gate starved by missing APIService: enforced=%v calls=%d", wh.enforced, wh.commitCalls)
+	}
 }
 
 // Phase 2c (#90, ADR-0030): the webhook caBundle + failurePolicy flip

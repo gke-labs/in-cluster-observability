@@ -24,7 +24,10 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // the v0.6 hardening milestone (#108, #109, #110).
 type MonitoringSpecCore struct {
 	// Protocols toggles per-protocol capture for the matched pods.
-	// At least one protocol must be enabled (CEL XValidation below).
+	// Enabling at least one protocol is not schema-enforced: a CR with
+	// no protocol enabled is admitted and the validating webhook emits a
+	// warning (not a rejection) per ADR-0030 §3 — a no-op spec is valid
+	// and simply monitors nothing.
 	//
 	// +kubebuilder:validation:Required
 	Protocols ProtocolSet `json:"protocols"`
@@ -69,10 +72,15 @@ type HTTPConfig struct {
 	// Ports is the list of TCP ports to instrument. If a matched
 	// pod's process opens one of these ports, OBI attaches L7
 	// uprobes. Empty defaults to common HTTP ports (80, 8080) at
-	// the controller. Each port must be in [1, 65535].
+	// the controller. Each port must be in [1, 65535] — enforced by
+	// the CRD schema so an out-of-range port is rejected even during
+	// the webhook's failurePolicy=Ignore bootstrap window (the webhook
+	// re-checks the same bound for a clear message).
 	//
 	// +kubebuilder:validation:MinItems=0
 	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:Minimum=1
+	// +kubebuilder:validation:items:Maximum=65535
 	// +optional
 	Ports []int32 `json:"ports,omitempty"`
 }

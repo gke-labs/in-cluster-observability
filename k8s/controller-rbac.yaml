@@ -67,11 +67,13 @@ rules:
     verbs: ["create", "patch"]
   # Self-managed CA (ADR-0028, #196): the leader injects the CA into the
   # custom-metrics APIService caBundle and drops insecureSkipTLSVerify.
-  # APIServices are cluster-scoped, so this grant is cluster-wide; it is
-  # patch-only on a resource the controller does not otherwise touch.
+  # The controller only Gets and MergePatches this one object by name, so
+  # the grant is resourceNames-scoped to it (get/patch only) — mirroring
+  # the validatingwebhookconfigurations rule below.
   - apiGroups: ["apiregistration.k8s.io"]
     resources: ["apiservices"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    resourceNames: ["v1beta1.custom.metrics.k8s.io"]
+    verbs: ["get", "patch"]
   # Validating webhook (ADR-0030, #90): the leader injects the CA into
   # the ValidatingWebhookConfiguration caBundle and flips failurePolicy
   # Ignore->Fail once every webhook endpoint serves the CA cert.

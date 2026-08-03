@@ -17,6 +17,7 @@ package ca
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -139,13 +140,18 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			return fmt.Errorf("ensure webhook serving cert: %w", err)
 		}
 	}
+	// The APIService and webhook gates are independent: neither depends
+	// on the other's outcome, and a fault in one must not starve the
+	// other (e.g. a missing custom-metrics APIService leaving the webhook
+	// stuck at failurePolicy=Ignore). Run both every pass and aggregate.
+	var errs []error
 	if err := m.reconcileAPIService(ctx, authority); err != nil {
-		return fmt.Errorf("reconcile APIService: %w", err)
+		errs = append(errs, fmt.Errorf("reconcile APIService: %w", err))
 	}
 	if err := m.reconcileWebhook(ctx, authority); err != nil {
-		return fmt.Errorf("reconcile webhook configuration: %w", err)
+		errs = append(errs, fmt.Errorf("reconcile webhook configuration: %w", err))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // reconcileWebhook drives the ValidatingWebhookConfiguration to the
@@ -328,6 +334,14 @@ func (m *Manager) ensureServingCert(ctx context.Context, authority *CA, secretNa
 func (m *Manager) reconcileAPIService(ctx context.Context, authority *CA) error {
 	curBundle, insecure, err := m.APISvc.Get(ctx)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// The custom-metrics APIService is not registered — nothing
+			// to gate. Mirror reconcileWebhook's NotFound tolerance so a
+			// missing aggregation registration cannot abort the pass and
+			// starve the webhook gate.
+			m.log().Info("apiservice gate: custom-metrics APIService not registered; nothing to gate")
+			return nil
+		}
 		return err
 	}
 	desired := authority.CertPEM()

@@ -117,7 +117,10 @@ spec:
               protocols:
                 description: |-
                   Protocols toggles per-protocol capture for the matched pods.
-                  At least one protocol must be enabled (CEL XValidation below).
+                  Enabling at least one protocol is not schema-enforced: a CR with
+                  no protocol enabled is admitted and the validating webhook emits a
+                  warning (not a rejection) per ADR-0030 §3 — a no-op spec is valid
+                  and simply monitors nothing.
                 properties:
                   http:
                     description: |-
@@ -134,9 +137,14 @@ spec:
                           Ports is the list of TCP ports to instrument. If a matched
                           pod's process opens one of these ports, OBI attaches L7
                           uprobes. Empty defaults to common HTTP ports (80, 8080) at
-                          the controller. Each port must be in [1, 65535].
+                          the controller. Each port must be in [1, 65535] — enforced by
+                          the CRD schema so an out-of-range port is rejected even during
+                          the webhook's failurePolicy=Ignore bootstrap window (the webhook
+                          re-checks the same bound for a clear message).
                         items:
                           format: int32
+                          maximum: 65535
+                          minimum: 1
                           type: integer
                         maxItems: 64
                         minItems: 0
