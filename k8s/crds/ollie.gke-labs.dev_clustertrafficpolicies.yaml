@@ -205,7 +205,6 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
             required:
-            - ""
             - protocols
             type: object
           status:

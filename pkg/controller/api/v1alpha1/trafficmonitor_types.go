@@ -27,9 +27,11 @@ type TrafficMonitorSpec struct {
 	WorkloadSelector metav1.LabelSelector `json:"workloadSelector"`
 
 	// MonitoringSpecCore — protocol toggles, ports, etc. See
-	// shared_types.go.
-	//
-	// +kubebuilder:validation:Required
+	// shared_types.go. No validation marker here: this is an inline
+	// embed, so a Required marker would add the empty json name ("") to
+	// the parent's required list and make the apiserver reject every CR
+	// with `spec.: Required value`. The embedded fields carry their own
+	// markers (Protocols is Required in shared_types.go).
 	MonitoringSpecCore `json:",inline"`
 }
 
