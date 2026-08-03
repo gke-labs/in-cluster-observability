@@ -173,3 +173,16 @@ spec:
       ports:
         - port: 9102
           protocol: TCP
+    # kube-apiserver -> validating admission webhook (#90, ADR-0030).
+    # Like the :6443 custom-metrics rule above, the apiserver originates
+    # from the control-plane host network, so no pod/namespace selector
+    # can pin it; the port stays open at the network layer. Identity is
+    # the serving cert the apiserver verifies against the CA-committed
+    # caBundle (only ollie-controller holds a CA-signed :9443 cert), so
+    # an open port is not an open door. Without this rule a policy-
+    # enforcing CNI drops the admission call and the CA manager's own
+    # gate-probe, so the webhook never leaves its failurePolicy=Ignore
+    # bootstrap posture.
+    - ports:
+        - port: 9443
+          protocol: TCP
