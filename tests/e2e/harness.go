@@ -22,9 +22,17 @@ package e2e
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -623,6 +631,303 @@ func (h *Harness) DeployTestWorkload() {
 	h.WaitRollout("deployment", "echo", "default", 2*time.Minute)
 	h.WaitRollout("deployment", "traffic-client", "default", 2*time.Minute)
 	installState.deployed = true
+}
+
+// tlsServerImage is the stdlib Go crypto/tls echo server + client
+// (tests/e2e/tlsserver), loaded once per run for the TLS-decrypt tests.
+const tlsServerImage = "ollie-e2e-tlsserver:e2e"
+
+// nginxImage is a stock, Debian-based nginx that dynamically links
+// system OpenSSL (libssl.so) — the uprobe target OBI needs for the
+// OpenSSL TLS-decrypt test (#107). Pinned like the OBI/collector images;
+// bump deliberately.
+const nginxImage = "nginx:1.27"
+
+// tlsServerState guards the tlsserver image build once-per-run; the two
+// deploy guards below mirror installState.deployed so each TLS workload
+// is stood up at most once in the shared cluster.
+var tlsServerState struct {
+	sync.Mutex
+	built  bool
+	failed string
+}
+
+var tlsGoState struct {
+	sync.Mutex
+	deployed bool
+}
+
+var tlsNginxState struct {
+	sync.Mutex
+	deployed bool
+}
+
+// BuildTLSServerImage compiles the stdlib tlsserver (tests/e2e/tlsserver)
+// into a FROM-scratch image and loads it into the shared cluster, once
+// per run. The binary is intentionally NOT stripped: OBI's Go-TLS
+// uprobes resolve crypto/tls functions from the Go symbol table, so a
+// `-ldflags=-s -w` strip would blind the very decrypt path this tests.
+func (h *Harness) BuildTLSServerImage(repoRoot string) {
+	h.t.Helper()
+	tlsServerState.Lock()
+	defer tlsServerState.Unlock()
+	if tlsServerState.failed != "" {
+		h.t.Fatalf("skipping: earlier tlsserver build failed: %s", tlsServerState.failed)
+	}
+	if tlsServerState.built {
+		return
+	}
+	tlsServerState.failed = "BuildTLSServerImage did not complete"
+
+	dir := h.t.TempDir()
+	bin := filepath.Join(dir, "tlsserver")
+	build := exec.Command("go", "build", "-o", bin, "./tests/e2e/tlsserver")
+	build.Dir = repoRoot
+	// Static linux binary for a scratch image; match the kind node arch
+	// (== host arch).
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
+	if out, err := build.CombinedOutput(); err != nil {
+		h.t.Fatalf("building tlsserver: %v\n%s", err, out)
+	}
+	dockerfile := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(dockerfile,
+		[]byte("FROM scratch\nCOPY tlsserver /tlsserver\nENTRYPOINT [\"/tlsserver\"]\n"), 0o600); err != nil {
+		h.t.Fatalf("write tlsserver Dockerfile: %v", err)
+	}
+	h.DockerBuild(tlsServerImage, dockerfile, dir)
+	h.KindLoad(tlsServerImage)
+
+	tlsServerState.built = true
+	tlsServerState.failed = ""
+}
+
+// DeployTLSGoWorkload starts the Go crypto/tls HTTPS echo server (#106)
+// plus a client that loops HTTPS requests through the Service, so the
+// encrypted traffic crosses the pod network where OBI's Go-TLS uprobes
+// attach. BuildTLSServerImage must have run first.
+func (h *Harness) DeployTLSGoWorkload() {
+	h.t.Helper()
+	tlsGoState.Lock()
+	defer tlsGoState.Unlock()
+	if tlsGoState.deployed {
+		h.t.Log("tls-go workload already deployed in the shared cluster; reusing")
+		return
+	}
+	h.ApplyStdin(tlsGoWorkloadManifest())
+	h.WaitRollout("deployment", "tls-go", "default", 2*time.Minute)
+	h.WaitRollout("deployment", "tls-go-client", "default", 2*time.Minute)
+	tlsGoState.deployed = true
+}
+
+// tlsGoWorkloadManifest is the Go crypto/tls server + its HTTPS client
+// loop. Server listens on 8443 (in the --obi-instrument-ports seed);
+// the client dials the Service by DNS so traffic crosses the pod
+// network, skipping cert verification (the server is self-signed).
+func tlsGoWorkloadManifest() string {
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tls-go
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: tls-go}
+  template:
+    metadata:
+      labels: {app: tls-go}
+    spec:
+      containers:
+        - name: server
+          image: %[1]s
+          imagePullPolicy: Never
+          args: ["serve"]
+          ports: [{containerPort: 8443}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tls-go
+  namespace: default
+spec:
+  selector: {app: tls-go}
+  ports: [{port: 8443, targetPort: 8443}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tls-go-client
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: tls-go-client}
+  template:
+    metadata:
+      labels: {app: tls-go-client}
+    spec:
+      containers:
+        - name: client
+          image: %[1]s
+          imagePullPolicy: Never
+          args: ["client", "https://tls-go.default.svc:8443/", "200"]
+`, tlsServerImage)
+}
+
+// nginxTLSConf is a minimal self-contained nginx config serving HTTPS on
+// 8443 from a mounted cert. Mounted over /etc/nginx/nginx.conf via
+// subPath so the stock image's mime.types / conf.d stay intact.
+const nginxTLSConf = `events {}
+http {
+  access_log off;
+  server {
+    listen 8443 ssl;
+    ssl_certificate     /etc/nginx/tls/tls.crt;
+    ssl_certificate_key /etc/nginx/tls/tls.key;
+    location / { return 200 "ok\n"; }
+  }
+}
+`
+
+// DeployTLSOpenSSLWorkload stands up a stock nginx (dynamically linked
+// against system OpenSSL) serving HTTPS on 8443, plus the Go client
+// looping HTTPS requests at it (#107). The cert is self-signed and
+// created as a Secret; nginx.conf as a ConfigMap. The point is to give
+// OBI's OpenSSL (libssl.so) uprobes real encrypted server-side traffic
+// to decrypt — the http.server series then proves the decrypt worked.
+func (h *Harness) DeployTLSOpenSSLWorkload() {
+	h.t.Helper()
+	tlsNginxState.Lock()
+	defer tlsNginxState.Unlock()
+	if tlsNginxState.deployed {
+		h.t.Log("tls-nginx workload already deployed in the shared cluster; reusing")
+		return
+	}
+	h.PullAndLoad(nginxImage)
+
+	// Self-signed serving cert for nginx. The client skips verification,
+	// so this only needs to be well-formed, not chained to a trusted CA.
+	certPEM, keyPEM := h.genSelfSignedCertPEM("tls-nginx.default.svc", "tls-nginx", "localhost")
+	dir := h.t.TempDir()
+	certFile := filepath.Join(dir, "tls.crt")
+	keyFile := filepath.Join(dir, "tls.key")
+	confFile := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		h.t.Fatalf("write nginx cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		h.t.Fatalf("write nginx key: %v", err)
+	}
+	if err := os.WriteFile(confFile, []byte(nginxTLSConf), 0o600); err != nil {
+		h.t.Fatalf("write nginx conf: %v", err)
+	}
+	// create (not apply): the once-per-run guard means these never
+	// pre-exist, and `create secret tls` avoids hand-base64'ing PEM.
+	h.Kubectl("create", "secret", "tls", "tls-nginx-cert", "-n", "default",
+		"--cert="+certFile, "--key="+keyFile)
+	h.Kubectl("create", "configmap", "tls-nginx-conf", "-n", "default",
+		"--from-file=nginx.conf="+confFile)
+
+	h.ApplyStdin(tlsNginxWorkloadManifest())
+	h.WaitRollout("deployment", "tls-nginx", "default", 2*time.Minute)
+	h.WaitRollout("deployment", "tls-nginx-client", "default", 2*time.Minute)
+	tlsNginxState.deployed = true
+}
+
+// tlsNginxWorkloadManifest is the nginx HTTPS server (cert Secret +
+// conf ConfigMap mounted) and the Go client loop pointed at it.
+func tlsNginxWorkloadManifest() string {
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tls-nginx
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: tls-nginx}
+  template:
+    metadata:
+      labels: {app: tls-nginx}
+    spec:
+      containers:
+        - name: nginx
+          image: %[1]s
+          imagePullPolicy: Never
+          ports: [{containerPort: 8443}]
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: cert
+              mountPath: /etc/nginx/tls
+              readOnly: true
+      volumes:
+        - name: conf
+          configMap: {name: tls-nginx-conf}
+        - name: cert
+          secret: {secretName: tls-nginx-cert}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tls-nginx
+  namespace: default
+spec:
+  selector: {app: tls-nginx}
+  ports: [{port: 8443, targetPort: 8443}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tls-nginx-client
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: tls-nginx-client}
+  template:
+    metadata:
+      labels: {app: tls-nginx-client}
+    spec:
+      containers:
+        - name: client
+          image: %[2]s
+          imagePullPolicy: Never
+          args: ["client", "https://tls-nginx.default.svc:8443/", "200"]
+`, nginxImage, tlsServerImage)
+}
+
+// genSelfSignedCertPEM mints an ECDSA P-256 self-signed serving cert and
+// returns it as PEM cert + key. Used for the nginx workload's Secret.
+func (h *Harness) genSelfSignedCertPEM(dnsNames ...string) (certPEM, keyPEM []byte) {
+	h.t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		h.t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: dnsNames[0]},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              dnsNames,
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		h.t.Fatalf("create cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		h.t.Fatalf("marshal key: %v", err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
 }
 
 // saveArtifact writes content under $ARTIFACTS (the path CI uploads) or

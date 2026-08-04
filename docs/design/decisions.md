@@ -958,7 +958,7 @@ The single hard hazard is the transition. Dropping `insecureSkipTLSVerify` while
 1. **HTTP/2 rides the existing `protocols.http` toggle; #104 reframed.** Since h2c is indistinguishable from HTTP/1.1, there is no separate `protocols.http2` CRD toggle and no version label. #104's acceptance is re-scoped from "tag `http_version=2`" to "h2c traffic is captured as `http.*` and gRPC-over-HTTP/2 is attributed distinctly as `rpc.*`."
 2. **gRPC is its own toggle and its own capture module.** `ProtocolSet.GRPC` (`GRPCConfig` = `enabled` + `ports`, structurally like HTTP but a separate type so the two can diverge later). The reconciler ORs `ProtocolGRPC` (bit `1<<3`; `1<<2` reserved for a hypothetical HTTP/2 that will never be independently selectable) and folds gRPC ports into the same wire port set as HTTP — OBI attaches uprobes per port and discriminates protocol from the wire, not the port, so one port serving both is fine and no new proto field is needed. The agent advertises the `grpc` module in `SupportedModules`.
 3. **Translation discriminates by RPC attributes, using the correct keys.** `TranslateTraces` classifies a span as `ModuleGRPC` when `rpc.system.name==\"grpc\"` (with `rpc.system` and bare `rpc.method` fallbacks) and promotes `rpc.method` → `SpanEvent.RPCMethod`, `rpc.response.status_code` → `SpanEvent.RPCStatus`; HTTP fields stay empty for gRPC. `classifyMetric` maps the `rpc.*` metric family → `ModuleGRPC`. The forwarder allowlist (`pkg/schema`) admits `rpc.method`, `rpc.response.status_code`, `rpc.system.name` — all low-cardinality, none sensitive.
-4. **TLS gets no toggle; it is a validation + docs deliverable.** #106/#107 add no capture code — TLS-decrypted traffic is already `http.*`/`rpc.*`. They are closed by e2e proof (Go `crypto/tls` server + nginx/OpenSSL) and the protocol matrix documenting automatic decrypt and BoringSSL's limitation.
+4. **TLS gets no toggle; it is a validation + docs deliverable.** #106/#107 add no capture code — TLS-decrypted traffic is already `http.*`/`rpc.*`. They are closed by e2e proof — `TestTLSDecryptGoCryptoTLS` (a Go `crypto/tls` HTTPS-only server) and `TestTLSDecryptOpenSSL` (stock nginx dynamically linked against system OpenSSL), each asserting the workload's `http_server_request_duration` series appears exactly as a plaintext workload's would — plus the protocol matrix documenting automatic decrypt and BoringSSL's limitation.
 5. **gRPC contract fixtures start synthetic.** The recorder's workload (agnhost echo) speaks only HTTP, so gRPC is "not yet recordable in our harness." A `-seed` synthetic `grpc-basic`/`grpc-metric-basic` fixture (using the real semconv keys above) provides contract coverage now; real recordings replace it once a gRPC workload is added to the e2e harness (a CI/GKE step, per REGENERATE.md).
 
 **Consequences.**
@@ -969,8 +969,9 @@ The single hard hazard is the transition. Dropping `insecureSkipTLSVerify` while
 - ⚠️ Ollie cannot report HTTP protocol version until OBI emits one. If a user needs "HTTP/2 vs HTTP/1.1" breakdown, that is an upstream OBI ask, tracked as roadmap, not a v0.6 deliverable.
 - ⚠️ gRPC contract freeze is synthetic until the harness grows a gRPC workload; the unit tests in `pkg/capture` carry the translation guarantee in the interim.
 - 📌 BoringSSL users get no L7 decrypt; documented in the matrix as ⚠️ limited.
+- ✅ TLS decrypt (Go `crypto/tls` + OpenSSL) is now e2e-verified on the real DaemonSet, not just documented — the last unproven Phase 3 protocol claim. The `tests/e2e/tlsserver` scratch binary is intentionally unstripped so OBI's Go-TLS uprobes can resolve `crypto/tls` symbols.
 
-**Implemented in.** `v0.6/phase-3-protocols`.
+**Implemented in.** `v0.6/phase-3-protocols` (translation), `v0.6/phase-3-tls-e2e` (TLS decrypt e2e).
 
 ---
 
