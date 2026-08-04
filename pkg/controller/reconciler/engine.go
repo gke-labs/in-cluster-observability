@@ -57,8 +57,9 @@ type Engine struct {
 }
 
 // Recompute lists every Pod, TrafficMonitor, and ClusterTrafficPolicy
-// in the cluster, calls ComputeSpec for each pod, and hands the
-// resulting pod_uid → MonitoringSpec map to the Dispatcher. Pods
+// in the cluster, calls ComputeCoverage to produce the per-pod specs
+// (and CR status rollups), and hands the resulting pod_uid →
+// MonitoringSpec map to the Dispatcher. Pods
 // whose spec is nil (no covering CR or no enabled protocol) are
 // omitted; Dispatcher emits REMOVE deltas for pods absent from the
 // new map.

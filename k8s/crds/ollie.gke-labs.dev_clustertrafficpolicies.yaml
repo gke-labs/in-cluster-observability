@@ -141,8 +141,9 @@ spec:
                           Ports is the list of TCP ports to instrument. If a matched pod's
                           process opens one of these ports, OBI attaches L7 uprobes and
                           classifies gRPC traffic distinctly from plaintext HTTP. Empty
-                          defaults to common gRPC ports at the controller. Each port must
-                          be in [1, 65535] — enforced by the CRD schema so an out-of-range
+                          adds no ports beyond the agent's default --obi-instrument-ports
+                          seed (the controller does not default a per-CR port list). Each
+                          port must be in [1, 65535] — enforced by the CRD schema so an out-of-range
                           port is rejected even during the webhook's failurePolicy=Ignore
                           bootstrap window.
                         items:
@@ -172,8 +173,9 @@ spec:
                         description: |-
                           Ports is the list of TCP ports to instrument. If a matched
                           pod's process opens one of these ports, OBI attaches L7
-                          uprobes. Empty defaults to common HTTP ports (80, 8080) at
-                          the controller. Each port must be in [1, 65535] — enforced by
+                          uprobes. Empty adds no ports beyond the agent's default
+                          --obi-instrument-ports seed (the controller does not default a
+                          per-CR port list). Each port must be in [1, 65535] — enforced by
                           the CRD schema so an out-of-range port is rejected even during
                           the webhook's failurePolicy=Ignore bootstrap window (the webhook
                           re-checks the same bound for a clear message).

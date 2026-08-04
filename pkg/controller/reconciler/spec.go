@@ -49,44 +49,9 @@ func ComputeSpec(pod *corev1.Pod, tms []*v1alpha1.TrafficMonitor, ctps []*v1alph
 	if covering == nil {
 		return nil
 	}
-	protocols := uint32(0)
-	httpPorts := map[int32]struct{}{}
-	if covering.Protocols.L4 != nil && covering.Protocols.L4.Enabled {
-		protocols |= ProtocolL4TCP
-	}
-	if covering.Protocols.HTTP != nil && covering.Protocols.HTTP.Enabled {
-		protocols |= ProtocolHTTP1
-		for _, p := range covering.Protocols.HTTP.Ports {
-			httpPorts[p] = struct{}{}
-		}
-	}
-	if covering.Protocols.GRPC != nil && covering.Protocols.GRPC.Enabled {
-		protocols |= ProtocolGRPC
-		// gRPC and HTTP share the L7 port set on the wire: OBI attaches
-		// uprobes per port and detects gRPC vs plaintext HTTP from the
-		// content-type, not the port (ADR-0031). So gRPC ports fold into
-		// the same instrumented-port set carried as HttpPorts.
-		for _, p := range covering.Protocols.GRPC.Ports {
-			httpPorts[p] = struct{}{}
-		}
-	}
-	if protocols == 0 {
-		return nil
-	}
-	ports := make([]uint32, 0, len(httpPorts))
-	for p := range httpPorts {
-		ports = append(ports, uint32(p))
-	}
-	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
-	return &cppb.MonitoringSpec{
-		PodUid:    string(pod.UID),
-		PodName:   pod.Name,
-		Namespace: pod.Namespace,
-		NodeName:  pod.Spec.NodeName,
-		Protocols: protocols,
-		HttpPorts: ports,
-		SourceRef: covering.sourceRef,
-	}
+	// Shape through the same helper the production ComputeCoverage path
+	// uses, so the two never drift on protocol handling.
+	return buildSpecFromCovering(pod, covering)
 }
 
 // coveringResult is the "which spec covers this pod" answer with a

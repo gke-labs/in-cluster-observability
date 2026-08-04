@@ -171,10 +171,13 @@ func ComputeCoverage(pods []*corev1.Pod, tms []*v1alpha1.TrafficMonitor, ctps []
 	return out
 }
 
-// buildSpecFromCovering is the spec-building half of the old
-// ComputeSpec, factored out so ComputeCoverage and ComputeSpec
-// (which the engine still uses for unit-test stability) both call
-// the same shaper.
+// buildSpecFromCovering is the single spec-shaping helper: it turns a
+// covering MonitoringSpecCore into the wire MonitoringSpec, folding the
+// enabled protocols into the bitset and the union of HTTP+gRPC L7 ports
+// into HttpPorts. ComputeCoverage (the production reconcile path) and
+// ComputeSpec (kept for unit-test stability) both call it, so the two
+// never drift on protocol handling. Returns nil if no protocol is
+// enabled.
 func buildSpecFromCovering(pod *corev1.Pod, cov *coveringResult) *cppb.MonitoringSpec {
 	protocols := uint32(0)
 	httpPorts := map[int32]struct{}{}
@@ -184,6 +187,16 @@ func buildSpecFromCovering(pod *corev1.Pod, cov *coveringResult) *cppb.Monitorin
 	if cov.Protocols.HTTP != nil && cov.Protocols.HTTP.Enabled {
 		protocols |= ProtocolHTTP1
 		for _, p := range cov.Protocols.HTTP.Ports {
+			httpPorts[p] = struct{}{}
+		}
+	}
+	if cov.Protocols.GRPC != nil && cov.Protocols.GRPC.Enabled {
+		protocols |= ProtocolGRPC
+		// gRPC and HTTP share the L7 port set on the wire: OBI attaches
+		// uprobes per port and detects gRPC vs plaintext HTTP from the
+		// content-type, not the port (ADR-0031). So gRPC ports fold into
+		// the same instrumented-port set carried as HttpPorts.
+		for _, p := range cov.Protocols.GRPC.Ports {
 			httpPorts[p] = struct{}{}
 		}
 	}
@@ -229,6 +242,21 @@ func specsAgree(a, b v1alpha1.MonitoringSpecCore) bool {
 			}
 		}
 	}
+	if grpcEnabled(a) != grpcEnabled(b) {
+		return false
+	}
+	if grpcEnabled(a) {
+		ap := normPorts(a.Protocols.GRPC.Ports)
+		bp := normPorts(b.Protocols.GRPC.Ports)
+		if len(ap) != len(bp) {
+			return false
+		}
+		for i := range ap {
+			if ap[i] != bp[i] {
+				return false
+			}
+		}
+	}
 	return true
 }
 
@@ -238,6 +266,10 @@ func l4Enabled(c v1alpha1.MonitoringSpecCore) bool {
 
 func httpEnabled(c v1alpha1.MonitoringSpecCore) bool {
 	return c.Protocols.HTTP != nil && c.Protocols.HTTP.Enabled
+}
+
+func grpcEnabled(c v1alpha1.MonitoringSpecCore) bool {
+	return c.Protocols.GRPC != nil && c.Protocols.GRPC.Enabled
 }
 
 func normPorts(ps []int32) []int32 {
