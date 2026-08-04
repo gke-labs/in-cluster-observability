@@ -424,6 +424,26 @@ func (h *Harness) PollHTTP(url string, timeout time.Duration, desc string, predi
 		timeout, desc, url, len(last))
 }
 
+// PollHTTPUntil is the non-fatal form of PollHTTP: it returns true if
+// predicate matches before the timeout and false otherwise, without
+// failing the test. Callers use it to detect a dead port-forward tunnel
+// (e.g. one bound to a pod that got replaced) and re-establish it.
+func (h *Harness) PollHTTPUntil(url string, timeout time.Duration, predicate func(body string) bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := insecureClient.Get(url)
+		if err == nil {
+			b, rerr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if rerr == nil && predicate(string(b)) {
+				return true
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false
+}
+
 // PollKubectl polls fn until predicate accepts its output or the
 // timeout expires; on timeout it fails the test with the last output
 // (kubectl errors count as output so 404s from --raw are visible).

@@ -90,19 +90,49 @@ func TestTLSDecryptOpenSSL(t *testing.T) {
 func assertHTTPServerSeriesForPod(t *testing.T, h *Harness, appLabel, podPrefix string, localPort int) {
 	t.Helper()
 
+	// These TLS tests run right after TestDegradedOnAgentLoss (Go source
+	// order), which deliberately churns agent pods. A port-forward bound
+	// to a pod that is about to be replaced dies silently and never
+	// recovers (0-byte scrapes for the whole poll), so first let the
+	// DaemonSet settle, then bind to whatever pod is currently live on
+	// the workload's node.
+	h.WaitRollout("daemonset", "ollie-agent", "ollie-system", 3*time.Minute)
+
 	node, err := h.KubectlOutput("get", "pod", "-n", "default", "-l", "app="+appLabel,
 		"-o", "jsonpath={.items[0].spec.nodeName}")
 	if err != nil {
 		t.Fatalf("%s node: %v", appLabel, err)
 	}
-	agentPod, err := h.KubectlOutput("get", "pod", "-n", "ollie-system",
-		"-l", "app.kubernetes.io/component=agent",
-		"--field-selector", "spec.nodeName="+strings.TrimSpace(node),
-		"-o", "jsonpath={.items[0].metadata.name}")
-	if err != nil {
-		t.Fatalf("agent pod on %s: %v", node, err)
+	node = strings.TrimSpace(node)
+
+	// Re-select the node's agent pod and re-establish the tunnel until the
+	// agent's own self-observability metrics answer, proving the forward
+	// is live — a stale tunnel to a replaced pod returns nothing. Each
+	// attempt uses a fresh local port so a lingering dead forward can't
+	// collide with the new one.
+	var base string
+	for attempt := 0; attempt < 4; attempt++ {
+		agentPod, err := h.KubectlOutput("get", "pod", "-n", "ollie-system",
+			"-l", "app.kubernetes.io/component=agent",
+			"--field-selector", "spec.nodeName="+node,
+			"-o", "jsonpath={.items[0].metadata.name}")
+		if err != nil || strings.TrimSpace(agentPod) == "" {
+			t.Logf("agent pod on %s not resolvable yet (attempt %d): %v", node, attempt+1, err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		candidate := h.PortForward("pod/"+strings.TrimSpace(agentPod), "ollie-system", localPort+attempt, 9090)
+		if h.PollHTTPUntil(candidate+"/metrics", 45*time.Second, func(b string) bool {
+			return strings.Contains(b, "ollie_")
+		}) {
+			base = candidate
+			break
+		}
+		t.Logf("agent self-obs not answering through %s on attempt %d (churn from the degraded test?); re-selecting", candidate, attempt+1)
 	}
-	base := h.PortForward("pod/"+strings.TrimSpace(agentPod), "ollie-system", localPort, 9090)
+	if base == "" {
+		t.Fatalf("agent scrape on node %s never became live for the %s workload", node, appLabel)
+	}
 
 	// Accept any Prometheus rendering of http.server.request.duration
 	// (suffix variants differ across exporter versions), same as the
