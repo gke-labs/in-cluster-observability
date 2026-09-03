@@ -15,7 +15,6 @@
 package main
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -61,9 +60,9 @@ func TestCollector_CumulativeSumPassesThrough(t *testing.T) {
 		Temporality: capture.TemporalityCumulative, Monotonic: true,
 	}
 	ev.Value = 100
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 	ev.Value = 250
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 
 	if got := testutil.ToFloat64(c); got != 250 {
 		t.Fatalf("cumulative sum must pass through: got %v, want 250 (not 350)", got)
@@ -80,8 +79,8 @@ func TestCollector_UnspecifiedTemporalityIsCumulative(t *testing.T) {
 		Temporality: capture.TemporalityUnspecified, Monotonic: true,
 	}
 	ev.Value = 10
-	c.Record(context.Background(), ev)
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
+	c.Record(t.Context(), ev)
 
 	if got := testutil.ToFloat64(c); got != 10 {
 		t.Fatalf("unspecified temporality must not accumulate: got %v, want 10", got)
@@ -96,9 +95,9 @@ func TestCollector_DeltaSumAccumulates(t *testing.T) {
 		Temporality: capture.TemporalityDelta, Monotonic: true,
 	}
 	ev.Value = 3
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 	ev.Value = 4
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 
 	if got := testutil.ToFloat64(c); got != 7 {
 		t.Fatalf("delta sum must accumulate: got %v, want 7", got)
@@ -116,8 +115,8 @@ func TestCollector_HistogramBucketsPreserved(t *testing.T) {
 		Bounds:       []float64{0.1, 1},
 		BucketCounts: []uint64{2, 1, 0},
 	}
-	c.Record(context.Background(), ev)
-	c.Record(context.Background(), ev) // second delta report merges
+	c.Record(t.Context(), ev)
+	c.Record(t.Context(), ev) // second delta report merges
 
 	out := render(t, c)
 	for _, want := range []string{
@@ -142,9 +141,9 @@ func TestCollector_HistogramCumulativeSnapshot(t *testing.T) {
 		Bounds:       []float64{0.5},
 		BucketCounts: []uint64{4, 1},
 	}
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 	ev.Count, ev.Value, ev.BucketCounts = 9, 2.5, []uint64{7, 2}
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 
 	out := strings.ReplaceAll(render(t, c), " ", "")
 	if !strings.Contains(out, "sample_count:9") {
@@ -158,9 +157,9 @@ func TestCollector_TypeComesFromOTLPNotName(t *testing.T) {
 	c := newTestCollector()
 	ev := capture.MetricEvent{Name: "queue.wait.duration", Type: capture.MetricTypeGauge}
 	ev.Value = 5
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 	ev.Value = 2
-	c.Record(context.Background(), ev)
+	c.Record(t.Context(), ev)
 
 	out := render(t, c)
 	if !strings.Contains(out, "type:GAUGE") && !strings.Contains(out, "GAUGE") {
@@ -178,7 +177,7 @@ func TestCollector_StaleSeriesEvicted(t *testing.T) {
 	fake := time.Now()
 	c.now = func() time.Time { return fake }
 
-	c.Record(context.Background(), capture.MetricEvent{
+	c.Record(t.Context(), capture.MetricEvent{
 		Name: "tcp.rx.bytes", Type: capture.MetricTypeSum,
 		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 1,
 		Attributes: map[string]string{"k8s.pod.name": "gone-pod"},
@@ -197,12 +196,12 @@ func TestCollector_StaleSeriesEvicted(t *testing.T) {
 // not 500 the whole scrape.
 func TestCollector_LabelSchemaCoerced(t *testing.T) {
 	c := newTestCollector()
-	c.Record(context.Background(), capture.MetricEvent{
+	c.Record(t.Context(), capture.MetricEvent{
 		Name: "tcp.rx.bytes", Type: capture.MetricTypeSum,
 		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 1,
 		Attributes: map[string]string{"k8s.pod.name": "a", "k8s.namespace.name": "ns"},
 	})
-	c.Record(context.Background(), capture.MetricEvent{
+	c.Record(t.Context(), capture.MetricEvent{
 		Name: "tcp.rx.bytes", Type: capture.MetricTypeSum,
 		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 2,
 		Attributes: map[string]string{"k8s.pod.name": "b"}, // missing namespace
@@ -224,13 +223,13 @@ func TestCollector_LabelSchemaCoerced(t *testing.T) {
 func TestCollector_LabelSchemaWidens(t *testing.T) {
 	c := newTestCollector()
 	// First point pins the schema to {k8s_pod_name}.
-	c.Record(context.Background(), capture.MetricEvent{
+	c.Record(t.Context(), capture.MetricEvent{
 		Name: "http.server.request.duration.total", Type: capture.MetricTypeSum,
 		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 1,
 		Attributes: map[string]string{"k8s.pod.name": "a"},
 	})
 	// Second point of the same name adds http.route — must widen, not drop.
-	c.Record(context.Background(), capture.MetricEvent{
+	c.Record(t.Context(), capture.MetricEvent{
 		Name: "http.server.request.duration.total", Type: capture.MetricTypeSum,
 		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 2,
 		Attributes: map[string]string{"k8s.pod.name": "a", "http.route": "/users"},
@@ -259,12 +258,12 @@ func TestCollector_LabelSchemaWidens(t *testing.T) {
 // series, each with its own total.
 func TestCollector_DirectionNotCollapsed(t *testing.T) {
 	c := newTestCollector()
-	c.Record(context.Background(), capture.MetricEvent{
+	c.Record(t.Context(), capture.MetricEvent{
 		Name: "obi.network.flow.bytes", Type: capture.MetricTypeSum,
 		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 100,
 		Attributes: map[string]string{"direction": "request"},
 	})
-	c.Record(context.Background(), capture.MetricEvent{
+	c.Record(t.Context(), capture.MetricEvent{
 		Name: "obi.network.flow.bytes", Type: capture.MetricTypeSum,
 		Temporality: capture.TemporalityCumulative, Monotonic: true, Value: 250,
 		Attributes: map[string]string{"direction": "response"},
@@ -283,7 +282,7 @@ func TestCollector_DirectionNotCollapsed(t *testing.T) {
 // only schema.ForwardableLabel keys are re-emitted, and drops are
 // accounted on the self-obs counter.
 func TestCollector_LabelAllowlistAndDropAccounting(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	c := newOBICollector(mp.Meter("test"))
@@ -330,8 +329,8 @@ func TestCollector_LabelAllowlistAndDropAccounting(t *testing.T) {
 // target_info / otel_scope_info stay dropped.
 func TestCollector_MetaMetricsDropped(t *testing.T) {
 	c := newTestCollector()
-	c.Record(context.Background(), capture.MetricEvent{Name: "target_info", Type: capture.MetricTypeGauge, Value: 1})
-	c.Record(context.Background(), capture.MetricEvent{Name: "otel_scope_info", Type: capture.MetricTypeGauge, Value: 1})
+	c.Record(t.Context(), capture.MetricEvent{Name: "target_info", Type: capture.MetricTypeGauge, Value: 1})
+	c.Record(t.Context(), capture.MetricEvent{Name: "otel_scope_info", Type: capture.MetricTypeGauge, Value: 1})
 	if n := testutil.CollectAndCount(c); n != 0 {
 		t.Fatalf("meta-metrics must be dropped; got %d series", n)
 	}
