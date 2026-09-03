@@ -16,7 +16,10 @@ package e2e
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +54,7 @@ func (h *Harness) Setup() {
 	}
 
 	h.t.Cleanup(func() {
+		h.CollectLogs()
 		h.Teardown()
 	})
 }
@@ -157,5 +161,75 @@ func (h *Harness) WaitForReplicas(deploymentName string, namespace string, expec
 			return
 		}
 		time.Sleep(2 * time.Second)
+	}
+}
+
+func (h *Harness) CollectLogs() {
+	h.t.Helper()
+	h.t.Log("Collecting E2E test logs and artifacts...")
+
+	runCmd := func(name string, args ...string) string {
+		cmd := exec.Command(name, args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Sprintf("Command failed: %v\nOutput: %s", err, string(out))
+		}
+		return string(out)
+	}
+
+	// 1. Collect cluster info and resources status
+	h.saveArtifact("pods.txt", runCmd("kubectl", "get", "pods", "-A", "-o", "wide"))
+	h.saveArtifact("services.txt", runCmd("kubectl", "get", "svc", "-A", "-o", "wide"))
+	h.saveArtifact("deployments.txt", runCmd("kubectl", "get", "deploy", "-A", "-o", "wide"))
+	h.saveArtifact("daemonsets.txt", runCmd("kubectl", "get", "ds", "-A", "-o", "wide"))
+	h.saveArtifact("hpa.txt", runCmd("kubectl", "get", "hpa", "-A"))
+	h.saveArtifact("events.txt", runCmd("kubectl", "get", "events", "-A", "--sort-by=.metadata.creationTimestamp"))
+	h.saveArtifact("apiservices.txt", runCmd("kubectl", "get", "apiservice"))
+
+	// 2. Describe critical workloads
+	h.saveArtifact("describe-test-app.txt", runCmd("kubectl", "describe", "deploy/test-app", "-n", "default"))
+	h.saveArtifact("describe-test-client.txt", runCmd("kubectl", "describe", "deploy/test-client", "-n", "default"))
+	h.saveArtifact("describe-query-server.txt", runCmd("kubectl", "describe", "deploy/query-server", "-n", "observability-system"))
+	h.saveArtifact("describe-hpa.txt", runCmd("kubectl", "describe", "hpa/test-app", "-n", "default"))
+
+	// 3. Dump logs of all pods in relevant namespaces
+	namespaces := []string{"observability-system", "default", "cert-manager"}
+	for _, ns := range namespaces {
+		podsJSON := runCmd("kubectl", "get", "pods", "-n", ns, "-o", "jsonpath={range .items[*]}{.metadata.name}{'\\n'}{end}")
+		podNames := strings.Split(strings.TrimSpace(podsJSON), "\n")
+		for _, pod := range podNames {
+			pod = strings.TrimSpace(pod)
+			if pod == "" {
+				continue
+			}
+			// Get container names for the pod
+			containersJSON := runCmd("kubectl", "get", "pod", pod, "-n", ns, "-o", "jsonpath={range .spec.containers[*]}{.name}{'\\n'}{end}")
+			containers := strings.Split(strings.TrimSpace(containersJSON), "\n")
+			for _, container := range containers {
+				container = strings.TrimSpace(container)
+				if container == "" {
+					continue
+				}
+				logs := runCmd("kubectl", "logs", pod, "-n", ns, "-c", container)
+				h.saveArtifact(fmt.Sprintf("logs/%s/%s-%s.log", ns, pod, container), logs)
+
+				// Also try to get previous logs if any
+				prevLogs := runCmd("kubectl", "logs", pod, "-n", ns, "-c", container, "--previous")
+				if !strings.Contains(prevLogs, "Command failed") {
+					h.saveArtifact(fmt.Sprintf("logs/%s/%s-%s-previous.log", ns, pod, container), prevLogs)
+				}
+			}
+		}
+	}
+}
+
+func (h *Harness) saveArtifact(name, content string) {
+	dir := os.Getenv("ARTIFACTS")
+	if dir == "" {
+		dir = "/tmp/artifacts"
+	}
+	path := filepath.Join(dir, "otel-e2e", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+		_ = os.WriteFile(path, []byte(content), 0o644)
 	}
 }

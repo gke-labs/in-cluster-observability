@@ -28,16 +28,13 @@ import (
 	"time"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/queryserver"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
-	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
-	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
-	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -80,141 +77,6 @@ func (s *logsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 	return &collogspb.ExportLogsServiceResponse{}, nil
 }
 
-type queryServer struct {
-	writer *Writer
-	pb.UnimplementedQueryServiceServer
-}
-
-func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingServer[pb.QueryResponse]) error {
-	results, err := s.writer.Query(stream.Context(), req.Query)
-	if err != nil {
-		return err
-	}
-
-	for _, res := range results {
-		switch msg := res.(type) {
-		case *colmetricspb.ExportMetricsServiceRequest:
-			for _, rm := range msg.ResourceMetrics {
-				for _, sm := range rm.ScopeMetrics {
-					for _, m := range sm.Metrics {
-						singleReq := &colmetricspb.ExportMetricsServiceRequest{
-							ResourceMetrics: []*metricspb.ResourceMetrics{
-								{
-									Resource:  rm.Resource,
-									SchemaUrl: rm.SchemaUrl,
-									ScopeMetrics: []*metricspb.ScopeMetrics{
-										{
-											Scope:     sm.Scope,
-											SchemaUrl: sm.SchemaUrl,
-											Metrics:   []*metricspb.Metric{m},
-										},
-									},
-								},
-							},
-						}
-						b, err := proto.Marshal(singleReq)
-						if err != nil {
-							log.Printf("error marshaling metric: %v", err)
-							continue
-						}
-						if len(b) > 4194304 {
-							txt, _ := prototext.Marshal(singleReq)
-							log.Printf("metric message exceeds gRPC max size (4MB). size=%d, msg=%s", len(b), txt)
-							continue
-						}
-						if err := stream.Send(&pb.QueryResponse{Metrics: [][]byte{b}}); err != nil {
-							return err
-						}
-					}
-				}
-			}
-		case *collogspb.ExportLogsServiceRequest:
-			for _, rl := range msg.ResourceLogs {
-				for _, sl := range rl.ScopeLogs {
-					for _, lr := range sl.LogRecords {
-						singleReq := &collogspb.ExportLogsServiceRequest{
-							ResourceLogs: []*logspb.ResourceLogs{
-								{
-									Resource:  rl.Resource,
-									SchemaUrl: rl.SchemaUrl,
-									ScopeLogs: []*logspb.ScopeLogs{
-										{
-											Scope:      sl.Scope,
-											SchemaUrl:  sl.SchemaUrl,
-											LogRecords: []*logspb.LogRecord{lr},
-										},
-									},
-								},
-							},
-						}
-						b, err := proto.Marshal(singleReq)
-						if err != nil {
-							log.Printf("error marshaling log: %v", err)
-							continue
-						}
-						if len(b) > 4194304 {
-							txt, _ := prototext.Marshal(singleReq)
-							log.Printf("log message exceeds gRPC max size (4MB). size=%d, msg=%s", len(b), txt)
-							continue
-						}
-						if err := stream.Send(&pb.QueryResponse{Logs: [][]byte{b}}); err != nil {
-							return err
-						}
-					}
-				}
-			}
-		case *coltracepb.ExportTraceServiceRequest:
-			for _, rs := range msg.ResourceSpans {
-				for _, ss := range rs.ScopeSpans {
-					for _, span := range ss.Spans {
-						singleReq := &coltracepb.ExportTraceServiceRequest{
-							ResourceSpans: []*tracepb.ResourceSpans{
-								{
-									Resource:  rs.Resource,
-									SchemaUrl: rs.SchemaUrl,
-									ScopeSpans: []*tracepb.ScopeSpans{
-										{
-											Scope:     ss.Scope,
-											SchemaUrl: ss.SchemaUrl,
-											Spans:     []*tracepb.Span{span},
-										},
-									},
-								},
-							},
-						}
-						b, err := proto.Marshal(singleReq)
-						if err != nil {
-							log.Printf("error marshaling trace: %v", err)
-							continue
-						}
-						if len(b) > 4194304 {
-							txt, _ := prototext.Marshal(singleReq)
-							log.Printf("trace message exceeds gRPC max size (4MB). size=%d, msg=%s", len(b), txt)
-							continue
-						}
-						if err := stream.Send(&pb.QueryResponse{Traces: [][]byte{b}}); err != nil {
-							return err
-						}
-					}
-				}
-			}
-		default:
-			log.Printf("unknown result type: %T", res)
-			continue
-		}
-	}
-
-	return nil
-}
-
-type QueryRequest struct {
-	Query string `json:"query"`
-}
-
-type QueryResponse struct {
-	Results []json.RawMessage `json:"results"`
-}
-
 func main() {
 	addr := flag.String("addr", ":4317", "address to listen on for gRPC")
 	httpAddr := flag.String("http-addr", ":4318", "address to listen on for HTTP queries")
@@ -239,7 +101,7 @@ func main() {
 	coltracepb.RegisterTraceServiceServer(s, &traceServer{writer: writer})
 	colmetricspb.RegisterMetricsServiceServer(s, &metricsServer{writer: writer})
 	collogspb.RegisterLogsServiceServer(s, &logsServer{writer: writer})
-	pb.RegisterQueryServiceServer(s, &queryServer{writer: writer})
+	pb.RegisterQueryServiceServer(s, queryserver.NewSinkQueryServer(writer))
 
 	log.Printf("gRPC listening on %s, writing to %s", *addr, *path)
 
@@ -308,7 +170,7 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var qreq QueryRequest
+		var qreq queryserver.QueryRequest
 		if err := json.NewDecoder(r.Body).Decode(&qreq); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -330,7 +192,7 @@ func main() {
 			rawResults = append(rawResults, json.RawMessage(b))
 		}
 
-		resp := QueryResponse{Results: rawResults}
+		resp := queryserver.QueryResponse{Results: rawResults}
 		json.NewEncoder(w).Encode(resp)
 	})
 

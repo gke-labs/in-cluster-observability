@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v3.21.12
-// source: proto/query.proto
+// source: query.proto
 
 package pb
 
@@ -120,5 +120,5 @@ var FrontendQueryService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "proto/query.proto",
+	Metadata: "query.proto",
 }

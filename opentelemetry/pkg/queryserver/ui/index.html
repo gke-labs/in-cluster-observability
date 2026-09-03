@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenTelemetry Logs Search</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --border-color: #334155;
+            --primary-color: #38bdf8;
+            --primary-hover: #0ea5e9;
+            --severity-error: #ef4444;
+            --severity-warn: #f59e0b;
+            --severity-info: #10b981;
+            --severity-debug: #8b5cf6;
+            --severity-unknown: #6b7280;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.5;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        h1 {
+            font-size: 1.875rem;
+            font-weight: 700;
+            color: var(--text-color);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        h1 span {
+            color: var(--primary-color);
+        }
+
+        .search-panel {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+
+        .search-form {
+            display: grid;
+            grid-template-columns: 1fr auto auto auto;
+            gap: 1rem;
+            align-items: flex-end;
+        }
+
+        @media (max-width: 1024px) {
+            .search-form {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .form-group label {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        input[type="text"], select, input[type="datetime-local"] {
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            padding: 0.625rem 1rem;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            width: 100%;
+            outline: none;
+            transition: border-color 0.15s ease-in-out;
+        }
+
+        input[type="text"]:focus, select:focus, input[type="datetime-local"]:focus {
+            border-color: var(--primary-color);
+        }
+
+        button {
+            background-color: var(--primary-color);
+            color: #0f172a;
+            border: none;
+            padding: 0.625rem 1.5rem;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.15s ease-in-out;
+            height: fit-content;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+
+        .meta-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .results-container {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background-color: rgba(15, 23, 42, 0.5);
+            padding: 0.75rem 1rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border-color);
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            vertical-align: top;
+            word-break: break-word;
+        }
+
+        tr.log-row {
+            cursor: pointer;
+            transition: background-color 0.15s ease-in-out;
+        }
+
+        tr.log-row:hover {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .timestamp-col {
+            white-space: nowrap;
+            color: var(--text-secondary);
+            font-family: monospace;
+            width: 200px;
+        }
+
+        .severity-col {
+            width: 100px;
+        }
+
+        .severity-badge {
+            display: inline-block;
+            padding: 0.125rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .severity-error { background-color: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); }
+        .severity-warn { background-color: rgba(245, 158, 11, 0.2); color: #fde047; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .severity-info { background-color: rgba(16, 185, 129, 0.2); color: #86efac; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .severity-debug { background-color: rgba(139, 92, 246, 0.2); color: #c4b5fd; border: 1px solid rgba(139, 92, 246, 0.3); }
+        .severity-unknown { background-color: rgba(107, 114, 128, 0.2); color: #d1d5db; border: 1px solid rgba(107, 114, 128, 0.3); }
+
+        .meta-col {
+            color: var(--text-secondary);
+            font-size: 0.825rem;
+            width: 250px;
+        }
+
+        .meta-item {
+            display: flex;
+            gap: 0.25rem;
+            margin-bottom: 0.125rem;
+        }
+
+        .meta-label {
+            font-weight: 600;
+            color: #475569;
+        }
+
+        .body-col {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            color: #e2e8f0;
+        }
+
+        .detail-row {
+            background-color: rgba(15, 23, 42, 0.3);
+            display: none;
+        }
+
+        .detail-row td {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .json-viewer {
+            background-color: #0b0f19;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.85rem;
+            color: #38bdf8;
+            max-height: 400px;
+            max-width: 100%;
+        }
+
+        .empty-state {
+            padding: 3rem;
+            text-align: center;
+            color: var(--text-secondary);
+        }
+
+        .syntax-hint {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 0.5rem;
+        }
+
+        .syntax-hint code {
+            background-color: rgba(255, 255, 255, 0.05);
+            padding: 0.125rem 0.25rem;
+            border-radius: 4px;
+            color: var(--primary-color);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Ollie <span>Logs Search</span></h1>
+            <div id="status-indicator" style="font-size: 0.875rem; color: var(--text-secondary);"></div>
+        </header>
+
+        <section class="search-panel">
+            <form id="search-form" class="search-form">
+                <div class="form-group">
+                    <label for="query-input">Query</label>
+                    <input type="text" id="query-input" placeholder="e.g. namespace=kube-system pod=coredns-* severity=error 'connection refused'">
+                </div>
+
+                <div class="form-group" style="width: 150px;">
+                    <label for="time-range-select">Time Range</label>
+                    <select id="time-range-select">
+                        <option value="15m">Last 15 minutes</option>
+                        <option value="1h" selected>Last 1 hour</option>
+                        <option value="6h">Last 6 hours</option>
+                        <option value="24h">Last 24 hours</option>
+                        <option value="custom">Custom...</option>
+                    </select>
+                </div>
+
+                <div class="form-group custom-time" id="start-time-group" style="display: none; width: 200px;">
+                    <label for="start-time-input">Start Time</label>
+                    <input type="datetime-local" id="start-time-input">
+                </div>
+
+                <div class="form-group custom-time" id="end-time-group" style="display: none; width: 200px;">
+                    <label for="end-time-input">End Time</label>
+                    <input type="datetime-local" id="end-time-input">
+                </div>
+
+                <button type="submit" id="search-button">Search</button>
+            </form>
+            <div class="syntax-hint">
+                <strong>Filters:</strong> <code>namespace=&lt;val&gt;</code>, <code>pod=&lt;val&gt;</code>, <code>container=&lt;val&gt;</code>, <code>service=&lt;val&gt;</code>, <code>severity=&lt;val&gt;</code>, <code>key=value</code> (with <code>*</code> wildcard support). Multiple terms and quoted phrases are ANDed.
+            </div>
+        </section>
+
+        <div class="meta-info">
+            <div id="results-count">No query executed yet</div>
+            <div id="capped-indicator" style="display: none; color: var(--severity-warn); font-weight: 500;">Results capped at limit</div>
+        </div>
+
+        <section class="results-container">
+            <table id="results-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Severity</th>
+                        <th>Namespace / Pod</th>
+                        <th>Body</th>
+                    </tr>
+                </thead>
+                <tbody id="results-body">
+                    <tr>
+                        <td colspan="4" class="empty-state">Enter a query and click Search to find logs.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+    </div>
+
+    <script>
+        const form = document.getElementById('search-form');
+        const queryInput = document.getElementById('query-input');
+        const timeRangeSelect = document.getElementById('time-range-select');
+        const startTimeInput = document.getElementById('start-time-input');
+        const endTimeInput = document.getElementById('end-time-input');
+        const startTimeGroup = document.getElementById('start-time-group');
+        const endTimeGroup = document.getElementById('end-time-group');
+        const resultsBody = document.getElementById('results-body');
+        const resultsCount = document.getElementById('results-count');
+        const cappedIndicator = document.getElementById('capped-indicator');
+
+        // Handle time range selection visibility
+        timeRangeSelect.addEventListener('change', () => {
+            if (timeRangeSelect.value === 'custom') {
+                startTimeGroup.style.display = 'flex';
+                endTimeGroup.style.display = 'flex';
+            } else {
+                startTimeGroup.style.display = 'none';
+                endTimeGroup.style.display = 'none';
+            }
+        });
+
+        // Initialize state from URL params
+        function initFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            const q = params.get('q');
+            const start = params.get('start');
+            const end = params.get('end');
+            const range = params.get('range');
+
+            if (q) queryInput.value = q;
+            if (range) {
+                timeRangeSelect.value = range;
+                timeRangeSelect.dispatchEvent(new Event('change'));
+            }
+
+            if (range === 'custom') {
+                if (start) startTimeInput.value = start;
+                if (end) endTimeInput.value = end;
+            }
+
+            if (q || range) {
+                executeSearch();
+            }
+        }
+
+        // Format severity for badges
+        function getSeverityClass(sev) {
+            const s = (sev || '').toLowerCase();
+            if (s.includes('err') || s.includes('fatal')) return 'severity-error';
+            if (s.includes('warn')) return 'severity-warn';
+            if (s.includes('info')) return 'severity-info';
+            if (s.includes('debug') || s.includes('trace')) return 'severity-debug';
+            return 'severity-unknown';
+        }
+
+        // Execute Search API call
+        async function executeSearch() {
+            resultsBody.innerHTML = '<tr><td colspan="4" class="empty-state">Searching logs...</td></tr>';
+            resultsCount.textContent = 'Searching...';
+            cappedIndicator.style.display = 'none';
+
+            const q = queryInput.value;
+            const range = timeRangeSelect.value;
+            let start, end;
+
+            if (range === 'custom') {
+                start = startTimeInput.value ? new Date(startTimeInput.value).toISOString() : '';
+                end = endTimeInput.value ? new Date(endTimeInput.value).toISOString() : '';
+            } else {
+                const now = new Date();
+                end = now.toISOString();
+                let durationMs = 60 * 60 * 1000; // default 1h
+                if (range === '15m') durationMs = 15 * 60 * 1000;
+                else if (range === '6h') durationMs = 6 * 60 * 60 * 1000;
+                else if (range === '24h') durationMs = 24 * 60 * 60 * 1000;
+                start = new Date(now.getTime() - durationMs).toISOString();
+            }
+
+            // Update URL parameters
+            const urlParams = new URLSearchParams();
+            if (q) urlParams.set('q', q);
+            urlParams.set('range', range);
+            if (range === 'custom') {
+                if (startTimeInput.value) urlParams.set('start', startTimeInput.value);
+                if (endTimeInput.value) urlParams.set('end', endTimeInput.value);
+            }
+            window.history.replaceState({}, '', `${window.location.pathname}?${urlParams.toString()}`);
+
+            try {
+                const limit = 1000;
+                const apiURL = `/api/logs/search?q=${encodeURIComponent(q)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&limit=${limit}`;
+                const response = await fetch(apiURL);
+                if (!response.ok) {
+                    throw new Error(`API returned HTTP ${response.status}: ${await response.text()}`);
+                }
+
+                const data = await response.json();
+                renderResults(data, limit);
+            } catch (err) {
+                resultsBody.innerHTML = `<tr><td colspan="4" class="empty-state" style="color: var(--severity-error);">Error: ${err.message}</td></tr>`;
+                resultsCount.textContent = 'Error occurred';
+            }
+        }
+
+        // Render search results
+        function renderResults(logs, limit) {
+            if (!logs || logs.length === 0) {
+                resultsBody.innerHTML = '<tr><td colspan="4" class="empty-state">No matching logs found in this time window.</td></tr>';
+                resultsCount.textContent = '0 logs found';
+                return;
+            }
+
+            resultsCount.textContent = `${logs.length} log${logs.length === 1 ? '' : 's'} found`;
+            if (logs.length >= limit) {
+                cappedIndicator.style.display = 'inline-block';
+            }
+
+            resultsBody.innerHTML = '';
+            logs.forEach((log, index) => {
+                // Main log row
+                const tr = document.createElement('tr');
+                tr.className = 'log-row';
+                tr.id = `log-row-${index}`;
+
+                // Timestamp
+                const tdTime = document.createElement('td');
+                tdTime.className = 'timestamp-col';
+                tdTime.textContent = formatTimestamp(log.timestamp);
+                tr.appendChild(tdTime);
+
+                // Severity
+                const tdSev = document.createElement('td');
+                tdSev.className = 'severity-col';
+                const badge = document.createElement('span');
+                badge.className = `severity-badge ${getSeverityClass(log.severity)}`;
+                badge.textContent = log.severity || 'INFO';
+                tdSev.appendChild(badge);
+                tr.appendChild(tdSev);
+
+                // Meta Info (Namespace / Pod)
+                const tdMeta = document.createElement('td');
+                tdMeta.className = 'meta-col';
+                
+                let metaHTML = '';
+                if (log.namespace) {
+                    metaHTML += `<div class="meta-item"><span class="meta-label">ns:</span><span>${escapeHTML(log.namespace)}</span></div>`;
+                }
+                if (log.pod) {
+                    metaHTML += `<div class="meta-item"><span class="meta-label">pod:</span><span>${escapeHTML(log.pod)}</span></div>`;
+                }
+                if (log.container) {
+                    metaHTML += `<div class="meta-item"><span class="meta-label">container:</span><span>${escapeHTML(log.container)}</span></div>`;
+                }
+                if (log.service) {
+                    metaHTML += `<div class="meta-item"><span class="meta-label">service:</span><span>${escapeHTML(log.service)}</span></div>`;
+                }
+                tdMeta.innerHTML = metaHTML || '<span style="color:#475569;">none</span>';
+                tr.appendChild(tdMeta);
+
+                // Body Col
+                const tdBody = document.createElement('td');
+                tdBody.className = 'body-col';
+                tdBody.textContent = log.body || '';
+                tr.appendChild(tdBody);
+
+                resultsBody.appendChild(tr);
+
+                // Expandable Detail row
+                const trDetail = document.createElement('tr');
+                trDetail.className = 'detail-row';
+                trDetail.id = `detail-row-${index}`;
+                
+                const tdDetail = document.createElement('td');
+                tdDetail.colSpan = 4;
+                
+                const pre = document.createElement('pre');
+                pre.className = 'json-viewer';
+                pre.textContent = JSON.stringify(log.raw, null, 2);
+                tdDetail.appendChild(pre);
+                trDetail.appendChild(tdDetail);
+
+                resultsBody.appendChild(trDetail);
+
+                // Handle row toggle
+                tr.addEventListener('click', () => {
+                    const isVisible = trDetail.style.display === 'table-row';
+                    trDetail.style.display = isVisible ? 'none' : 'table-row';
+                    tr.style.backgroundColor = isVisible ? '' : 'rgba(255, 255, 255, 0.05)';
+                });
+            });
+        }
+
+        function formatTimestamp(rfcStr) {
+            if (!rfcStr) return '';
+            try {
+                const date = new Date(rfcStr);
+                return date.toISOString().replace('T', ' ').substring(0, 23);
+            } catch(e) {
+                return rfcStr;
+            }
+        }
+
+        function escapeHTML(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            executeSearch();
+        });
+
+        // Load initially
+        window.addEventListener('load', initFromURL);
+    </script>
+</body>
+</html>

@@ -39,6 +39,8 @@ message RegisterResponse {
 service QueryService {
   // Query executes a query on the sink.
   rpc Query(QueryRequest) returns (stream QueryResponse);
+
+  rpc SearchLogs(SearchLogsRequest) returns (stream SearchLogsResponse);
 }
 
 message QueryRequest {
@@ -50,4 +52,21 @@ message QueryResponse {
   repeated bytes metrics = 1;
   repeated bytes logs = 2;
   repeated bytes traces = 3;
+}
+
+message SearchLogsRequest {
+  int64 start_time_unix_nano = 1;
+  int64 end_time_unix_nano = 2;
+  repeated string body_contains = 3;      // case-insensitive substrings, ANDed
+  repeated AttributeFilter attributes = 4; // ANDed
+  int32 limit = 5;                         // per-sink cap
+}
+
+message AttributeFilter {
+  string key = 1;    // resolved key, e.g. "k8s.namespace.name"; "SeverityText" handled as a well-known field
+  string value = 2;  // supports '*' glob
+}
+
+message SearchLogsResponse {
+  repeated bytes logs = 1;
 }

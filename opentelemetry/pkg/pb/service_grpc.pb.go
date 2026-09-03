@@ -16,7 +16,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v3.21.12
-// source: proto/service.proto
+// source: service.proto
 
 package pb
 
@@ -135,11 +135,12 @@ var RegistrationService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "proto/service.proto",
+	Metadata: "service.proto",
 }
 
 const (
-	QueryService_Query_FullMethodName = "/opentelemetry.QueryService/Query"
+	QueryService_Query_FullMethodName      = "/opentelemetry.QueryService/Query"
+	QueryService_SearchLogs_FullMethodName = "/opentelemetry.QueryService/SearchLogs"
 )
 
 // QueryServiceClient is the client API for QueryService service.
@@ -150,6 +151,7 @@ const (
 type QueryServiceClient interface {
 	// Query executes a query on the sink.
 	Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[QueryResponse], error)
+	SearchLogs(ctx context.Context, in *SearchLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SearchLogsResponse], error)
 }
 
 type queryServiceClient struct {
@@ -179,6 +181,25 @@ func (c *queryServiceClient) Query(ctx context.Context, in *QueryRequest, opts .
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type QueryService_QueryClient = grpc.ServerStreamingClient[QueryResponse]
 
+func (c *queryServiceClient) SearchLogs(ctx context.Context, in *SearchLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SearchLogsResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &QueryService_ServiceDesc.Streams[1], QueryService_SearchLogs_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SearchLogsRequest, SearchLogsResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type QueryService_SearchLogsClient = grpc.ServerStreamingClient[SearchLogsResponse]
+
 // QueryServiceServer is the server API for QueryService service.
 // All implementations must embed UnimplementedQueryServiceServer
 // for forward compatibility.
@@ -187,6 +208,7 @@ type QueryService_QueryClient = grpc.ServerStreamingClient[QueryResponse]
 type QueryServiceServer interface {
 	// Query executes a query on the sink.
 	Query(*QueryRequest, grpc.ServerStreamingServer[QueryResponse]) error
+	SearchLogs(*SearchLogsRequest, grpc.ServerStreamingServer[SearchLogsResponse]) error
 	mustEmbedUnimplementedQueryServiceServer()
 }
 
@@ -199,6 +221,9 @@ type UnimplementedQueryServiceServer struct{}
 
 func (UnimplementedQueryServiceServer) Query(*QueryRequest, grpc.ServerStreamingServer[QueryResponse]) error {
 	return status.Error(codes.Unimplemented, "method Query not implemented")
+}
+func (UnimplementedQueryServiceServer) SearchLogs(*SearchLogsRequest, grpc.ServerStreamingServer[SearchLogsResponse]) error {
+	return status.Error(codes.Unimplemented, "method SearchLogs not implemented")
 }
 func (UnimplementedQueryServiceServer) mustEmbedUnimplementedQueryServiceServer() {}
 func (UnimplementedQueryServiceServer) testEmbeddedByValue()                      {}
@@ -232,6 +257,17 @@ func _QueryService_Query_Handler(srv interface{}, stream grpc.ServerStream) erro
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type QueryService_QueryServer = grpc.ServerStreamingServer[QueryResponse]
 
+func _QueryService_SearchLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SearchLogsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(QueryServiceServer).SearchLogs(m, &grpc.GenericServerStream[SearchLogsRequest, SearchLogsResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type QueryService_SearchLogsServer = grpc.ServerStreamingServer[SearchLogsResponse]
+
 // QueryService_ServiceDesc is the grpc.ServiceDesc for QueryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -245,6 +281,11 @@ var QueryService_ServiceDesc = grpc.ServiceDesc{
 			Handler:       _QueryService_Query_Handler,
 			ServerStreams: true,
 		},
+		{
+			StreamName:    "SearchLogs",
+			Handler:       _QueryService_SearchLogs_Handler,
+			ServerStreams: true,
+		},
 	},
-	Metadata: "proto/service.proto",
+	Metadata: "service.proto",
 }

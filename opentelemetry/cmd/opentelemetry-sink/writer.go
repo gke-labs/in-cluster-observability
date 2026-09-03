@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,11 +32,14 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/cmd/opentelemetry-sink/pb"
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/async"
+	pkgpb "github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/store"
 	"k8s.io/klog/v2"
 )
@@ -667,4 +671,315 @@ func createMessage(typeName string) (proto.Message, error) {
 	default:
 		return nil, fmt.Errorf("unknown type: %s", typeName)
 	}
+}
+
+func anyValueString(v *commonpb.AnyValue) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.GetValue().(type) {
+	case *commonpb.AnyValue_StringValue:
+		return val.StringValue
+	case *commonpb.AnyValue_BoolValue:
+		if val.BoolValue {
+			return "true"
+		}
+		return "false"
+	case *commonpb.AnyValue_IntValue:
+		return strconv.FormatInt(val.IntValue, 10)
+	case *commonpb.AnyValue_DoubleValue:
+		return strconv.FormatFloat(val.DoubleValue, 'g', -1, 64)
+	default:
+		return v.String()
+	}
+}
+
+func globMatch(pattern, val string) bool {
+	if pattern == "*" {
+		return true
+	}
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == val
+	}
+	if !strings.HasPrefix(val, parts[0]) {
+		return false
+	}
+	val = val[len(parts[0]):]
+	for i := 1; i < len(parts)-1; i++ {
+		idx := strings.Index(val, parts[i])
+		if idx == -1 {
+			return false
+		}
+		val = val[idx+len(parts[i]):]
+	}
+	return strings.HasSuffix(val, parts[len(parts)-1])
+}
+
+func getAttributeValue(rl *logspb.ResourceLogs, lr *logspb.LogRecord, key string) (string, bool) {
+	if rl.Resource != nil {
+		for _, attr := range rl.Resource.Attributes {
+			if attr.GetKey() == key {
+				return anyValueString(attr.GetValue()), true
+			}
+		}
+	}
+	for _, attr := range lr.Attributes {
+		if attr.GetKey() == key {
+			return anyValueString(attr.GetValue()), true
+		}
+	}
+	return "", false
+}
+
+func parseShardNanos(name string) (int64, error) {
+	base := filepath.Base(name)
+	if !strings.HasPrefix(base, "shard-") || !strings.HasSuffix(base, ".bin") {
+		return 0, fmt.Errorf("invalid shard name: %s", name)
+	}
+	nanosStr := base[len("shard-") : len(base)-len(".bin")]
+	var nanos int64
+	_, err := fmt.Sscanf(nanosStr, "%d", &nanos)
+	if err != nil {
+		return 0, err
+	}
+	return nanos, nil
+}
+
+type matchedLog struct {
+	timestamp int64
+	data      []byte
+}
+
+func (w *Writer) SearchLogs(ctx context.Context, req *pkgpb.SearchLogsRequest) ([][]byte, error) {
+	// Flush current shard so we can read from it
+	w.fileMutex.Lock()
+	if w.f != nil {
+		w.f.Sync()
+	}
+	w.fileMutex.Unlock()
+
+	entries, err := os.ReadDir(w.dir)
+	if err != nil {
+		return nil, err
+	}
+
+	type shardInfo struct {
+		path  string
+		nanos int64
+	}
+
+	var shards []shardInfo
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "shard-") && strings.HasSuffix(entry.Name(), ".bin") {
+			nanos, err := parseShardNanos(entry.Name())
+			if err != nil {
+				continue
+			}
+			shards = append(shards, shardInfo{
+				path:  filepath.Join(w.dir, entry.Name()),
+				nanos: nanos,
+			})
+		}
+	}
+
+	// Sort shards ascending so that we can easily find the start and end of each shard's duration
+	sort.Slice(shards, func(i, j int) bool {
+		return shards[i].nanos < shards[j].nanos
+	})
+
+	var candidateShards []string
+	for i, sh := range shards {
+		// Shard starts at sh.nanos.
+		// If shard starts after query end time + 5m, we skip it.
+		if sh.nanos > req.EndTimeUnixNano+int64(5*time.Minute) {
+			continue
+		}
+
+		// If there is a next shard, this shard ends when the next one starts.
+		// If next shard starts before query start time - 5m, this shard ended before query start, so we skip it.
+		if i+1 < len(shards) {
+			nextStart := shards[i+1].nanos
+			if nextStart+int64(5*time.Minute) < req.StartTimeUnixNano {
+				continue
+			}
+		}
+
+		candidateShards = append(candidateShards, sh.path)
+	}
+
+	var matches []matchedLog
+
+	for _, file := range candidateShards {
+		err := func() error {
+			f, err := os.Open(file)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			fileHeader := make([]byte, 16)
+			n, err := io.ReadFull(f, fileHeader)
+			if err != nil {
+				if err == io.EOF {
+					return nil
+				}
+				return err
+			}
+
+			if n < 16 || binary.BigEndian.Uint32(fileHeader[0:4]) != fileMagic {
+				// Legacy file, seek to start
+				if _, err := f.Seek(0, io.SeekStart); err != nil {
+					return err
+				}
+			} else {
+				version := binary.BigEndian.Uint32(fileHeader[4:8])
+				if version > fileVersion {
+					return nil
+				}
+			}
+
+			typeByCode := make(map[TypeCode]string)
+
+			for {
+				header := make([]byte, 16)
+				if _, err := io.ReadFull(f, header); err != nil {
+					break
+				}
+
+				length := binary.BigEndian.Uint32(header[0:4])
+				expectedChecksum := binary.BigEndian.Uint32(header[4:8])
+				typeCode := TypeCode(binary.BigEndian.Uint32(header[12:16]))
+
+				data := make([]byte, length)
+				if _, err := io.ReadFull(f, data); err != nil {
+					break
+				}
+
+				if crc32.ChecksumIEEE(data) != expectedChecksum {
+					break
+				}
+
+				if typeCode == TypeCode_ObjectType {
+					obj := &pb.ObjectType{}
+					if err := obj.Unmarshal(data); err == nil {
+						typeByCode[TypeCode(obj.TypeCode)] = obj.TypeName
+					}
+					continue
+				}
+
+				typeName, ok := typeByCode[typeCode]
+				if !ok {
+					continue
+				}
+
+				if typeName != "opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest" {
+					continue
+				}
+
+				msg := &collogspb.ExportLogsServiceRequest{}
+				if err := proto.Unmarshal(data, msg); err != nil {
+					continue
+				}
+
+				for _, rl := range msg.ResourceLogs {
+					for _, sl := range rl.ScopeLogs {
+						for _, lr := range sl.LogRecords {
+							ts := int64(lr.TimeUnixNano)
+							if ts == 0 {
+								ts = int64(lr.ObservedTimeUnixNano)
+							}
+
+							if ts < req.StartTimeUnixNano || ts > req.EndTimeUnixNano {
+								continue
+							}
+
+							bodyStr := anyValueString(lr.Body)
+							bodyStrLower := strings.ToLower(bodyStr)
+							bodyMatched := true
+							for _, term := range req.BodyContains {
+								if !strings.Contains(bodyStrLower, strings.ToLower(term)) {
+									bodyMatched = false
+									break
+								}
+							}
+							if !bodyMatched {
+								continue
+							}
+
+							attrsMatched := true
+							for _, filter := range req.Attributes {
+								if filter.Key == "SeverityText" {
+									if !globMatch(strings.ToLower(filter.Value), strings.ToLower(lr.SeverityText)) {
+										attrsMatched = false
+										break
+									}
+								} else {
+									val, found := getAttributeValue(rl, lr, filter.Key)
+									if !found {
+										attrsMatched = false
+										break
+									}
+									if !globMatch(filter.Value, val) {
+										attrsMatched = false
+										break
+									}
+								}
+							}
+							if !attrsMatched {
+								continue
+							}
+
+							singleReq := &collogspb.ExportLogsServiceRequest{
+								ResourceLogs: []*logspb.ResourceLogs{
+									{
+										Resource:  rl.Resource,
+										SchemaUrl: rl.SchemaUrl,
+										ScopeLogs: []*logspb.ScopeLogs{
+											{
+												Scope:      sl.Scope,
+												SchemaUrl:  sl.SchemaUrl,
+												LogRecords: []*logspb.LogRecord{lr},
+											},
+										},
+									},
+								},
+							}
+
+							b, err := proto.Marshal(singleReq)
+							if err != nil {
+								continue
+							}
+
+							matches = append(matches, matchedLog{
+								timestamp: ts,
+								data:      b,
+							})
+						}
+					}
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			log.Printf("error reading shard %s: %v", file, err)
+		}
+	}
+
+	// Sort globally newest-first
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].timestamp > matches[j].timestamp
+	})
+
+	limit := int(req.Limit)
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
+
+	var results [][]byte
+	for _, m := range matches {
+		results = append(results, m.data)
+	}
+
+	return results, nil
 }

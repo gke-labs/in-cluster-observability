@@ -24,12 +24,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/cmd/opentelemetry-sink/pb"
+	pkgpb "github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 )
 
 func TestWriter(t *testing.T) {
@@ -493,4 +499,211 @@ func makeRecordHeader(data []byte, typeCode TypeCode) []byte {
 	binary.BigEndian.PutUint32(header[8:12], 0) // Flags
 	binary.BigEndian.PutUint32(header[12:16], uint32(typeCode))
 	return header
+}
+
+func TestWriter_SearchLogs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "otel-test-search-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	writer, err := NewWriter(tmpDir, "", 0)
+	if err != nil {
+		t.Fatalf("failed to create writer: %v", err)
+	}
+	defer writer.Close()
+
+	ctx := t.Context()
+	now := time.Now().UnixNano()
+
+	// 1. Write some logs
+	log1 := makeLogRequest(now-10000000000, "connection refused", "ERROR", map[string]string{"k8s.namespace.name": "kube-system", "k8s.pod.name": "coredns-1"}, nil)
+	log2 := makeLogRequest(now-5000000000, "timeout error", "WARN", map[string]string{"k8s.namespace.name": "kube-system", "k8s.pod.name": "coredns-2"}, nil)
+	log3 := makeLogRequest(now+5000000000, "connection timeout", "ERROR", map[string]string{"k8s.namespace.name": "default", "k8s.pod.name": "nginx-1"}, nil)
+	log4 := makeLogRequest(now+10000000000, "hello world", "INFO", map[string]string{"k8s.namespace.name": "default", "k8s.pod.name": "nginx-2"}, nil)
+
+	if err := writer.WriteObject(ctx, log1); err != nil {
+		t.Fatalf("failed to write log1: %v", err)
+	}
+	if err := writer.WriteObject(ctx, log2); err != nil {
+		t.Fatalf("failed to write log2: %v", err)
+	}
+
+	// Rotate shard to test shard skipping
+	if err := writer.rotateShard(); err != nil {
+		t.Fatalf("failed to rotate shard: %v", err)
+	}
+
+	if err := writer.WriteObject(ctx, log3); err != nil {
+		t.Fatalf("failed to write log3: %v", err)
+	}
+	if err := writer.WriteObject(ctx, log4); err != nil {
+		t.Fatalf("failed to write log4: %v", err)
+	}
+
+	// Test case 1: Retrieve all, check newest-first sorting
+	{
+		req := &pkgpb.SearchLogsRequest{
+			StartTimeUnixNano: now - 30000000000,
+			EndTimeUnixNano:   now + 30000000000,
+			Limit:             10,
+		}
+		res, err := writer.SearchLogs(ctx, req)
+		if err != nil {
+			t.Fatalf("SearchLogs failed: %v", err)
+		}
+		if len(res) != 4 {
+			t.Errorf("expected 4 logs, got %d", len(res))
+		}
+		// Verify newest-first
+		var timestamps []int64
+		for _, b := range res {
+			var unmarshaled collogspb.ExportLogsServiceRequest
+			if err := proto.Unmarshal(b, &unmarshaled); err != nil {
+				t.Fatalf("failed to unmarshal result: %v", err)
+			}
+			lr := unmarshaled.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+			timestamps = append(timestamps, int64(lr.TimeUnixNano))
+		}
+		expectedTimestamps := []int64{now + 10000000000, now + 5000000000, now - 5000000000, now - 10000000000}
+		for i, ts := range timestamps {
+			if ts != expectedTimestamps[i] {
+				t.Errorf("at index %d, expected timestamp %d, got %d", i, expectedTimestamps[i], ts)
+			}
+		}
+	}
+
+	// Test case 2: Limit
+	{
+		req := &pkgpb.SearchLogsRequest{
+			StartTimeUnixNano: now - 30000000000,
+			EndTimeUnixNano:   now + 30000000000,
+			Limit:             2,
+		}
+		res, err := writer.SearchLogs(ctx, req)
+		if err != nil {
+			t.Fatalf("SearchLogs failed: %v", err)
+		}
+		if len(res) != 2 {
+			t.Errorf("expected 2 logs, got %d", len(res))
+		}
+	}
+
+	// Test case 3: Body matching (ANDed)
+	{
+		req := &pkgpb.SearchLogsRequest{
+			StartTimeUnixNano: now - 30000000000,
+			EndTimeUnixNano:   now + 30000000000,
+			BodyContains:      []string{"connection", "timeout"},
+			Limit:             10,
+		}
+		res, err := writer.SearchLogs(ctx, req)
+		if err != nil {
+			t.Fatalf("SearchLogs failed: %v", err)
+		}
+		if len(res) != 1 {
+			t.Errorf("expected 1 log, got %d", len(res))
+		}
+	}
+
+	// Test case 4: Attribute matching (SeverityText case-insensitive)
+	{
+		req := &pkgpb.SearchLogsRequest{
+			StartTimeUnixNano: now - 30000000000,
+			EndTimeUnixNano:   now + 30000000000,
+			Attributes: []*pkgpb.AttributeFilter{
+				{Key: "SeverityText", Value: "error"},
+			},
+			Limit: 10,
+		}
+		res, err := writer.SearchLogs(ctx, req)
+		if err != nil {
+			t.Fatalf("SearchLogs failed: %v", err)
+		}
+		if len(res) != 2 {
+			t.Errorf("expected 2 logs, got %d", len(res))
+		}
+	}
+
+	// Test case 5: Attribute matching with glob
+	{
+		req := &pkgpb.SearchLogsRequest{
+			StartTimeUnixNano: now - 30000000000,
+			EndTimeUnixNano:   now + 30000000000,
+			Attributes: []*pkgpb.AttributeFilter{
+				{Key: "k8s.pod.name", Value: "coredns-*"},
+			},
+			Limit: 10,
+		}
+		res, err := writer.SearchLogs(ctx, req)
+		if err != nil {
+			t.Fatalf("SearchLogs failed: %v", err)
+		}
+		if len(res) != 2 {
+			t.Errorf("expected 2 logs, got %d", len(res))
+		}
+	}
+
+	// Test case 6: Time-range shard skipping (only query range [now-30s, now])
+	{
+		req := &pkgpb.SearchLogsRequest{
+			StartTimeUnixNano: now - 30000000000,
+			EndTimeUnixNano:   now,
+			Limit:             10,
+		}
+		res, err := writer.SearchLogs(ctx, req)
+		if err != nil {
+			t.Fatalf("SearchLogs failed: %v", err)
+		}
+		if len(res) != 2 {
+			t.Errorf("expected 2 logs in range [now-30s, now], got %d", len(res))
+		}
+	}
+}
+
+func makeLogRequest(timestampNano int64, body string, severity string, resourceAttrs map[string]string, logAttrs map[string]string) *collogspb.ExportLogsServiceRequest {
+	var rattrs []*commonpb.KeyValue
+	for k, v := range resourceAttrs {
+		rattrs = append(rattrs, &commonpb.KeyValue{
+			Key: k,
+			Value: &commonpb.AnyValue{
+				Value: &commonpb.AnyValue_StringValue{StringValue: v},
+			},
+		})
+	}
+
+	var lattrs []*commonpb.KeyValue
+	for k, v := range logAttrs {
+		lattrs = append(lattrs, &commonpb.KeyValue{
+			Key: k,
+			Value: &commonpb.AnyValue{
+				Value: &commonpb.AnyValue_StringValue{StringValue: v},
+			},
+		})
+	}
+
+	return &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				Resource: &resourcepb.Resource{
+					Attributes: rattrs,
+				},
+				ScopeLogs: []*logspb.ScopeLogs{
+					{
+						LogRecords: []*logspb.LogRecord{
+							{
+								TimeUnixNano: uint64(timestampNano),
+								SeverityText: severity,
+								Body: &commonpb.AnyValue{
+									Value: &commonpb.AnyValue_StringValue{StringValue: body},
+								},
+								Attributes: lattrs,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
