@@ -1,0 +1,119 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version: 2
+updates:
+  # GitHub Actions workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 2
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      github-actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # Root Go module
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 2
+    groups:
+      gomod:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      gomod-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # Root Docker base images
+  - package-ecosystem: "docker"
+    directories:
+      - "/images/*"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 2
+    groups:
+      docker:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # Documentation site (npm)
+  - package-ecosystem: "npm"
+    directory: "/docs/site"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 2
+    groups:
+      npm:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # OpenTelemetry subtree Go module (separate ownership from root)
+  - package-ecosystem: "gomod"
+    directory: "/opentelemetry"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 2
+    groups:
+      opentelemetry-gomod:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      opentelemetry-gomod-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # OpenTelemetry subtree Docker base images (single group covering all subtree images)
+  - package-ecosystem: "docker"
+    directories:
+      - "/opentelemetry/images/*"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 2
+    groups:
+      opentelemetry-docker:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      opentelemetry-docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
