@@ -15,4 +15,10 @@
 # Pinned to the ap release that emits hash-pinned, zizmor-clean workflows
 # (gke-labs/gke-labs-infra#352). Keeps `ap generate` output deterministic so
 # ap-verify-generate stays byte-stable in CI.
-version: v0.0.0-20260728141405-4f68d0f10435
+version: v0.0.0-20261113190754-7794ff3cd68f
+generate:
+  ignoreOrphans:
+    - "opentelemetry/pkg/pb/*.pb.go"
+    - "pkg/controller/api/v1alpha1/zz_generated.deepcopy.go"
+    - "pkg/controller/pb/controlplane/v1/*.pb.go"
+    - "pkg/stream/pb/stream/v1/*.pb.go"
