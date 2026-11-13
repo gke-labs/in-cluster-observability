@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,28 +136,74 @@ func TestOpenTelemetryHPA(t *testing.T) {
 		},
 	}
 
-	startStr := time.Now().Add(-15 * time.Minute).Format(time.RFC3339)
-	endStr := time.Now().Add(5 * time.Minute).Format(time.RFC3339)
+	startStr := time.Now().Add(-15 * time.Minute).UTC().Format(time.RFC3339)
+	endStr := time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339)
+
+	pollLogs := func(queryURL string, timeout time.Duration) ([]map[string]any, []byte, error) {
+		deadline := time.Now().Add(timeout)
+		var lastStatusCode int
+		var lastBody []byte
+		var lastErr error
+
+		for time.Now().Before(deadline) {
+			resp, err := client.Get(queryURL)
+			if err != nil {
+				lastErr = fmt.Errorf("GET %s failed: %w", queryURL, err)
+				lastStatusCode = 0
+				lastBody = nil
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			lastStatusCode = resp.StatusCode
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = fmt.Errorf("failed to read response body (status %d): %w", resp.StatusCode, readErr)
+				lastBody = nil
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			lastBody = body
+			if resp.StatusCode != http.StatusOK {
+				lastErr = fmt.Errorf("unexpected status %d, body: %s", resp.StatusCode, string(body))
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			var res []map[string]any
+			if unmarshalErr := json.Unmarshal(body, &res); unmarshalErr != nil {
+				lastErr = fmt.Errorf("response is not a JSON list (status %d): %w\nResponse: %s", resp.StatusCode, unmarshalErr, string(body))
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			// Valid JSON list received.
+			lastErr = nil
+			if len(res) > 0 {
+				return res, body, nil
+			}
+
+			time.Sleep(1 * time.Second)
+		}
+
+		if lastErr != nil {
+			return nil, lastBody, fmt.Errorf("timed out after %s (last status %d): %w", timeout, lastStatusCode, lastErr)
+		}
+		return nil, lastBody, nil
+	}
 
 	// Query 1: Full-text search
 	query1 := "HTTP"
-	url1 := fmt.Sprintf("https://127.0.0.1:%d/api/logs/search?q=%s&start=%s&end=%s", localPort, query1, startStr, endStr)
-	resp1, err := client.Get(url1)
-	if err != nil {
-		t.Fatalf("failed to GET full-text search: %v", err)
-	}
-	defer resp1.Body.Close()
+	url1 := fmt.Sprintf("https://127.0.0.1:%d/api/logs/search?q=%s&start=%s&end=%s", localPort, url.QueryEscape(query1), url.QueryEscape(startStr), url.QueryEscape(endStr))
 
-	body1, err := io.ReadAll(resp1.Body)
-	if err != nil {
-		t.Fatalf("failed to read full-text search response body: %v", err)
+	results1, body1, err1 := pollLogs(url1, 1*time.Minute)
+	if err1 != nil {
+		t.Fatalf("full-text query failed: %v", err1)
 	}
 	t.Logf("Full-text query response: %s", string(body1))
 
-	var results1 []map[string]any
-	if err := json.Unmarshal(body1, &results1); err != nil {
-		t.Fatalf("failed to unmarshal full-text query results: %v\nResponse: %s", err, string(body1))
-	}
 	if len(results1) == 0 {
 		t.Errorf("expected some logs matching full-text query %q, got 0", query1)
 	} else {
@@ -165,23 +212,14 @@ func TestOpenTelemetryHPA(t *testing.T) {
 
 	// Query 2: namespace= structured query
 	query2 := "namespace=default"
-	url2 := fmt.Sprintf("https://127.0.0.1:%d/api/logs/search?q=%s&start=%s&end=%s", localPort, query2, startStr, endStr)
-	resp2, err := client.Get(url2)
-	if err != nil {
-		t.Fatalf("failed to GET namespace structured search: %v", err)
-	}
-	defer resp2.Body.Close()
+	url2 := fmt.Sprintf("https://127.0.0.1:%d/api/logs/search?q=%s&start=%s&end=%s", localPort, url.QueryEscape(query2), url.QueryEscape(startStr), url.QueryEscape(endStr))
 
-	body2, err := io.ReadAll(resp2.Body)
-	if err != nil {
-		t.Fatalf("failed to read namespace structured search response body: %v", err)
+	results2, body2, err2 := pollLogs(url2, 1*time.Minute)
+	if err2 != nil {
+		t.Fatalf("namespace structured query failed: %v", err2)
 	}
 	t.Logf("Namespace structured query response: %s", string(body2))
 
-	var results2 []map[string]any
-	if err := json.Unmarshal(body2, &results2); err != nil {
-		t.Fatalf("failed to unmarshal namespace query results: %v\nResponse: %s", err, string(body2))
-	}
 	if len(results2) == 0 {
 		t.Errorf("expected some logs matching structured query %q, got 0", query2)
 	} else {

@@ -30,7 +30,62 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
+
+func sendLog(ctx context.Context, client collogspb.LogsServiceClient, namespace, podName, serviceName, body string) {
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						{
+							Key: "k8s.namespace.name",
+							Value: &commonpb.AnyValue{
+								Value: &commonpb.AnyValue_StringValue{StringValue: namespace},
+							},
+						},
+						{
+							Key: "k8s.pod.name",
+							Value: &commonpb.AnyValue{
+								Value: &commonpb.AnyValue_StringValue{StringValue: podName},
+							},
+						},
+						{
+							Key: "service.name",
+							Value: &commonpb.AnyValue{
+								Value: &commonpb.AnyValue_StringValue{StringValue: serviceName},
+							},
+						},
+					},
+				},
+				ScopeLogs: []*logspb.ScopeLogs{
+					{
+						LogRecords: []*logspb.LogRecord{
+							{
+								TimeUnixNano: uint64(time.Now().UnixNano()),
+								SeverityText: "INFO",
+								Body: &commonpb.AnyValue{
+									Value: &commonpb.AnyValue_StringValue{StringValue: body},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := client.Export(ctxTimeout, req); err != nil {
+		log.Printf("failed to export log: %v", err)
+	}
+}
 
 func main() {
 	endpoint := flag.String("endpoint", "opentelemetry-node-agent.observability-system:4317", "OTLP endpoint")
@@ -100,12 +155,31 @@ func main() {
 		}
 	}()
 
+	logsConn, err := grpc.NewClient(*endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("failed to connect to log sink: %v", err)
+	}
+	defer logsConn.Close()
+	logsClient := collogspb.NewLogsServiceClient(logsConn)
+
+	logChan := make(chan string, 1000)
+	go func() {
+		for msg := range logChan {
+			sendLog(context.Background(), logsClient, namespace, podName, "test-app", msg)
+		}
+	}()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&requestCount, 1)
+		select {
+		case logChan <- fmt.Sprintf("HTTP %s %s request handled", r.Method, r.URL.Path):
+		default:
+		}
 		fmt.Fprintf(w, "OK")
 	})
 
 	log.Printf("test-app starting, sending metrics to %s, listening on %s", *endpoint, *addr)
+	sendLog(ctx, logsClient, namespace, podName, "test-app", fmt.Sprintf("HTTP test-app starting, sending metrics to %s, listening on %s", *endpoint, *addr))
 	if err := http.ListenAndServe(*addr, nil); err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
