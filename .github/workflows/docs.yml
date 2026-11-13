@@ -28,6 +28,7 @@ on:
     branches: [main]
     paths:
       - 'docs/site/**'
+      - 'ation/**'
       - 'scripts/verify-internal-links.py'
       - 'scripts/verify-redirects.py'
       - 'scripts/generate-redirects.py'
@@ -36,6 +37,7 @@ on:
     branches: [main]
     paths:
       - 'docs/site/**'
+      - 'ation/**'
       - 'scripts/verify-internal-links.py'
       - 'scripts/verify-redirects.py'
       - 'scripts/generate-redirects.py'
@@ -62,11 +64,28 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build docs-builder image
+        run: docker build -t docs-builder -f ation/images/ation/Dockerfile .
+
+      - name: Build ation
+        run: go build -C ation -o ../bin/ation .
+
+      - name: Build docs site with ation
+        run: ./bin/ation build -src docs/site -out docs/site/dist-ation -image docs-builder -exclude node_modules,dist,.astro
+
+      - name: Copy npm manifests for comparison build
+        run: cp ation/images/ation/package*.json docs/site/
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # ratchet:actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: docs/site/package-lock.json
+          cache-dependency-path: ation/images/ation/package-lock.json
 
       - name: Install (locked)
         working-directory: docs/site
@@ -75,6 +94,9 @@ jobs:
       - name: Build
         working-directory: docs/site
         run: npm run build
+
+      - name: Compare npm and ation builds
+        run: diff -r docs/site/dist docs/site/dist-ation
 
       # The redirect stubs for legacy Hugo URLs are committed under
       # docs/site/public/ (regenerate with scripts/generate-redirects.py);

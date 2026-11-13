@@ -66,9 +66,9 @@ updates:
         patterns:
           - "*"
 
-  # Documentation site (npm)
+  # Documentation site builder image (npm)
   - package-ecosystem: "npm"
-    directory: "/docs/site"
+    directory: "/ation/images/ation"
     schedule:
       interval: "daily"
     cooldown:
