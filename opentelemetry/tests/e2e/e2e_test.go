@@ -42,16 +42,16 @@ func TestOpenTelemetryHPA(t *testing.T) {
 	otelRoot := filepath.Join(gitRoot, "opentelemetry")
 
 	// Build and load images
-	h.DockerBuild("opentelemetry-node-agent:e2e", filepath.Join(otelRoot, "images/opentelemetry-node-agent/Dockerfile"), otelRoot)
+	h.DockerBuild("opentelemetry-node-agent:e2e", filepath.Join(otelRoot, "images/opentelemetry-node-agent/Dockerfile"), gitRoot)
 	h.KindLoad("opentelemetry-node-agent:e2e")
 
-	h.DockerBuild("opentelemetry-query-server:e2e", filepath.Join(otelRoot, "images/opentelemetry-query-server/Dockerfile"), otelRoot)
+	h.DockerBuild("opentelemetry-query-server:e2e", filepath.Join(otelRoot, "images/opentelemetry-query-server/Dockerfile"), gitRoot)
 	h.KindLoad("opentelemetry-query-server:e2e")
 
-	h.DockerBuild("test-app:e2e", filepath.Join(otelRoot, "images/test-app/Dockerfile"), otelRoot)
+	h.DockerBuild("test-app:e2e", filepath.Join(otelRoot, "images/test-app/Dockerfile"), gitRoot)
 	h.KindLoad("test-app:e2e")
 
-	h.DockerBuild("test-client:e2e", filepath.Join(otelRoot, "images/test-client/Dockerfile"), otelRoot)
+	h.DockerBuild("test-client:e2e", filepath.Join(otelRoot, "images/test-client/Dockerfile"), gitRoot)
 	h.KindLoad("test-client:e2e")
 
 	// Install cert-manager

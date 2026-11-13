@@ -15,7 +15,6 @@
 package compactor
 
 import (
-	"context"
 	"encoding/binary"
 	"hash/crc32"
 	"io"
@@ -296,7 +295,7 @@ func TestCompactorRoundTrip(t *testing.T) {
 		TmpDir:          os.TempDir(),
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := Compact(ctx, cfg); err != nil {
 		t.Fatalf("compaction failed: %v", err)
 	}
@@ -464,7 +463,7 @@ func readMetricsParquet(t *testing.T, path string) []MetricRow {
 }
 
 func TestOpenBucketWithPrefix_GS_S3(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	// Test file URL opening is successful
 	tmpDir, err := os.MkdirTemp("", "otel-compactor-bucket-prefix-*")
 	if err != nil {
