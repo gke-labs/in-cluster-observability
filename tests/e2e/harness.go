@@ -219,62 +219,10 @@ func (h *Harness) DockerBuild(tag, dockerfile, contextDir string) {
 	h.Run("docker", "build", "-t", tag, "-f", dockerfile, contextDir)
 }
 
-// Nodes returns the names of the nodes in this harness's cluster.
-func (h *Harness) Nodes() []string {
-	h.t.Helper()
-	out, err := exec.Command("kind", "get", "nodes", "--name", h.ClusterName).Output()
-	if err != nil {
-		h.t.Fatalf("getting kind nodes for %s: %v", h.ClusterName, err)
-	}
-	var nodes []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if node := strings.TrimSpace(line); node != "" {
-			nodes = append(nodes, node)
-		}
-	}
-	return nodes
-}
-
-// loadViaCtr exports the image from the host Docker daemon and imports
-// it directly into each node's containerd instance via ctr. This bypasses
-// kind load's hardcoded --all-platforms flag, which fails on Docker 29+
-// (Ubuntu 26.04+) when multi-platform images lack non-host blobs.
-func (h *Harness) loadViaCtr(tag string) {
-	h.t.Helper()
-	nodes := h.Nodes()
-	if len(nodes) == 0 {
-		h.t.Fatalf("loadViaCtr %s: no nodes found for cluster %s", tag, h.ClusterName)
-	}
-
-	tarPath := filepath.Join(h.t.TempDir(), "image.tar")
-	h.Run("docker", "save", "-o", tarPath, tag)
-	defer os.Remove(tarPath)
-
-	for _, node := range nodes {
-		f, err := os.Open(tarPath)
-		if err != nil {
-			h.t.Fatalf("loadViaCtr %s: open archive: %v", tag, err)
-		}
-		h.t.Logf("+ docker exec -i %s ctr --namespace=k8s.io images import - (%s)", node, tag)
-		cmd := exec.Command("docker", "exec", "-i", node, "ctr", "--namespace=k8s.io", "images", "import", "-")
-		cmd.Stdin = f
-		out, err := cmd.CombinedOutput()
-		_ = f.Close()
-		if err != nil {
-			h.t.Fatalf("loadViaCtr %s on %s failed: %v\n%s", tag, node, err, out)
-		}
-	}
-}
-
-// KindLoad loads a docker image into the cluster's nodes.
+// KindLoad loads a local docker image into the cluster's nodes.
 func (h *Harness) KindLoad(tag string) {
 	h.t.Helper()
-	h.t.Logf("+ kind load docker-image %s --name %s", tag, h.ClusterName)
-	cmd := exec.Command("kind", "load", "docker-image", tag, "--name", h.ClusterName)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		h.t.Logf("kind load failed (%v): %s; falling back to direct ctr import", err, strings.TrimSpace(string(out)))
-		h.loadViaCtr(tag)
-	}
+	h.Run("kind", "load", "docker-image", tag, "--name", h.ClusterName)
 }
 
 // PullAndLoad pulls a remote image on the host and loads it into the
