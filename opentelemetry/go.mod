@@ -1,8 +1,8 @@
 module github.com/gke-labs/in-cluster-observability/opentelemetry
 
-go 1.25.7
+go 1.27.0
 
-toolchain go1.26.6
+toolchain go1.27.4
 
 require (
 	github.com/google/cel-go v0.29.0

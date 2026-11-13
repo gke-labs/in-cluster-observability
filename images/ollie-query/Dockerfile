@@ -19,7 +19,7 @@
 
 ARG VERSION=v0.5.0-dev
 
-FROM golang:1.26@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS builder
+FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS builder
 ARG VERSION
 WORKDIR /src
 COPY go.mod go.sum* ./
