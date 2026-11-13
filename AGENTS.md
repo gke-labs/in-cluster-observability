@@ -40,6 +40,7 @@ What's in the repo:
 - `tests/contract/obi/` — OBI adapter contract tests + fixture harness
 - `dev/ci/presubmits/` — CI script wrappers
 - `.github/workflows/` — CI YAML
+- `.github/dependabot.yml` — Dependabot version and security updates configuration
 - `LICENSE`, `README.md`, `.gitignore`
 
 ## Where to read what
