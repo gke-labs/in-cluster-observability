@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Keep the image build context to what `go build ./cmd/...` needs.
-# Both images/*/Dockerfile COPY the repo root; without this the
-# context ships .git, the docs site, and the legacy opentelemetry
-# module on every build (#156).
+# Keep the image build context to what image builds need. Exclude version
+# control, documentation, developer scripts, and tests to minimize build
+# context transfer size.
 .git
 .github
 .claude
@@ -23,5 +22,4 @@ docs
 dev
 k8s
 tests
-opentelemetry
 *.md

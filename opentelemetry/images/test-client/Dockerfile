@@ -14,9 +14,9 @@
 
 FROM golang:1.27.4 AS builder
 WORKDIR /app
-COPY go.mod go.sum ./
+COPY opentelemetry/go.mod opentelemetry/go.sum ./
 RUN go mod download
-COPY . .
+COPY opentelemetry/ .
 RUN CGO_ENABLED=0 go build -o test-client ./cmd/test-client
 
 FROM gcr.io/distroless/static

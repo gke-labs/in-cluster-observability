@@ -16,14 +16,13 @@ package store
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestArchiveStore_UploadAndCheck(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	tmpDir, err := os.MkdirTemp("", "store-archive-test-*")
 	if err != nil {

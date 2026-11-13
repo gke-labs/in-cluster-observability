@@ -355,70 +355,76 @@ func writePartitionData[T any](ctx context.Context, bucket *blob.Bucket, signal 
 	var startIdx int
 	partIdx := 0
 	for startIdx < len(rows) {
-		tmpFile, err := os.CreateTemp(cfg.TmpDir, "otel-compactor-*.parquet")
-		if err != nil {
-			return fmt.Errorf("failed to create temp file: %w", err)
-		}
-		tmpPath := tmpFile.Name()
-		defer os.Remove(tmpPath)
+		nextIdx, err := func() (int, error) {
+			tmpFile, err := os.CreateTemp(cfg.TmpDir, "otel-compactor-*.parquet")
+			if err != nil {
+				return 0, fmt.Errorf("failed to create temp file: %w", err)
+			}
+			tmpPath := tmpFile.Name()
+			defer os.Remove(tmpPath)
 
-		// Set up parquet writer options, including default sort columns: ServiceName, Timestamp
-		allOpts := append([]parquet.WriterOption{
-			parquet.SchemaOf(new(T)),
-			parquet.Compression(&parquet.Zstd),
-			parquet.MaxRowsPerRowGroup(int64(cfg.RowGroupSize)),
-			parquet.SortingWriterConfig(
-				parquet.SortingColumns(
-					parquet.Ascending("ServiceName"),
-					parquet.Ascending("Timestamp"),
+			// Set up parquet writer options, including default sort columns: ServiceName, Timestamp
+			allOpts := append([]parquet.WriterOption{
+				parquet.SchemaOf(new(T)),
+				parquet.Compression(&parquet.Zstd),
+				parquet.MaxRowsPerRowGroup(int64(cfg.RowGroupSize)),
+				parquet.SortingWriterConfig(
+					parquet.SortingColumns(
+						parquet.Ascending("ServiceName"),
+						parquet.Ascending("Timestamp"),
+					),
 				),
-			),
-		}, writerOpts...)
+			}, writerOpts...)
 
-		writer := parquet.NewWriter(tmpFile, allOpts...)
+			writer := parquet.NewWriter(tmpFile, allOpts...)
 
-		var i int
-		for i = startIdx; i < len(rows); i++ {
-			if err := writer.Write(rows[i]); err != nil {
-				tmpFile.Close()
-				return fmt.Errorf("failed to write parquet row: %w", err)
-			}
-
-			// Periodically check size after flush
-			if (i-startIdx+1)%5000 == 0 {
-				if err := writer.Flush(); err != nil {
+			var i int
+			for i = startIdx; i < len(rows); i++ {
+				if err := writer.Write(rows[i]); err != nil {
 					tmpFile.Close()
-					return fmt.Errorf("failed to flush parquet writer: %w", err)
+					return 0, fmt.Errorf("failed to write parquet row: %w", err)
 				}
-				fi, err := tmpFile.Stat()
-				if err == nil && fi.Size() >= cfg.FileSizeLimit {
-					i++ // move pointer to next row and stop
-					break
+
+				// Periodically check size after flush
+				if (i-startIdx+1)%5000 == 0 {
+					if err := writer.Flush(); err != nil {
+						tmpFile.Close()
+						return 0, fmt.Errorf("failed to flush parquet writer: %w", err)
+					}
+					fi, err := tmpFile.Stat()
+					if err == nil && fi.Size() >= cfg.FileSizeLimit {
+						i++ // move pointer to next row and stop
+						break
+					}
 				}
 			}
-		}
 
-		if err := writer.Close(); err != nil {
+			if err := writer.Close(); err != nil {
+				tmpFile.Close()
+				return 0, fmt.Errorf("failed to close parquet writer: %w", err)
+			}
 			tmpFile.Close()
-			return fmt.Errorf("failed to close parquet writer: %w", err)
-		}
-		tmpFile.Close()
 
-		// Read and upload the file
-		partData, err := os.ReadFile(tmpPath)
+			// Read and upload the file
+			partData, err := os.ReadFile(tmpPath)
+			if err != nil {
+				return 0, fmt.Errorf("failed to read temporary parquet file: %w", err)
+			}
+
+			timestampNano := time.Now().UnixNano()
+			outputKey := fmt.Sprintf("parquet/signal=%s/date=%s/hour=%s/part-%d-%d.parquet",
+				signal, pk.date, pk.hour, timestampNano, partIdx)
+
+			if err := bucket.WriteAll(ctx, outputKey, partData, nil); err != nil {
+				return 0, fmt.Errorf("failed to write parquet part to bucket: %w", err)
+			}
+
+			return i, nil
+		}()
 		if err != nil {
-			return fmt.Errorf("failed to read temporary parquet file: %w", err)
+			return err
 		}
-
-		timestampNano := time.Now().UnixNano()
-		outputKey := fmt.Sprintf("parquet/signal=%s/date=%s/hour=%s/part-%d-%d.parquet",
-			signal, pk.date, pk.hour, timestampNano, partIdx)
-
-		if err := bucket.WriteAll(ctx, outputKey, partData, nil); err != nil {
-			return fmt.Errorf("failed to write parquet part to bucket: %w", err)
-		}
-
-		startIdx = i
+		startIdx = nextIdx
 		partIdx++
 	}
 
