@@ -266,7 +266,6 @@ func TestOTLPExport(t *testing.T) {
 	h.InstallOllie(repoRoot)
 
 	// A minimal collector: OTLP in, debug-log out.
-	h.PullAndLoad(collectorImage)
 	h.ApplyStdin(`
 apiVersion: v1
 kind: ConfigMap
@@ -308,7 +307,6 @@ spec:
       containers:
         - name: collector
           image: ` + collectorImage + `
-          imagePullPolicy: Never
           args: ["--config=/etc/otelcol/config.yaml"]
           volumeMounts:
             - {name: config, mountPath: /etc/otelcol}

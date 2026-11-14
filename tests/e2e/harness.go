@@ -225,14 +225,6 @@ func (h *Harness) KindLoad(tag string) {
 	h.Run("kind", "load", "docker-image", tag, "--name", h.ClusterName)
 }
 
-// PullAndLoad pulls a remote image on the host and loads it into the
-// cluster, so pod startup never depends on in-cluster registry access.
-func (h *Harness) PullAndLoad(image string) {
-	h.t.Helper()
-	h.Run("docker", "pull", image)
-	h.KindLoad(image)
-}
-
 // probeImage is the in-cluster auth-probe image (tests/e2e/probe),
 // loaded once per run by BuildProbeImage.
 const probeImage = "ollie-e2e-probe:e2e"
@@ -553,7 +545,6 @@ spec:
       containers:
         - name: echo
           image: %[1]s
-          imagePullPolicy: Never
           args: ["netexec", "--http-port=8080"]
           ports: [{containerPort: 8080}]
 ---
@@ -582,7 +573,6 @@ spec:
       containers:
         - name: client
           image: %[1]s
-          imagePullPolicy: Never
           command: ["/bin/sh", "-c"]
           args:
             - while true; do wget -q -O /dev/null http://echo.default.svc:8080/hostname || true; sleep 0.2; done
@@ -611,7 +601,6 @@ func (h *Harness) InstallOllie(repoRoot string) {
 	h.KindLoad("ollie-controller:e2e")
 	h.DockerBuild("ollie-query:e2e", filepath.Join(repoRoot, "images/ollie-query/Dockerfile"), repoRoot)
 	h.KindLoad("ollie-query:e2e")
-	h.PullAndLoad(PinnedOBIImage(h.t, repoRoot))
 
 	h.Kubectl("apply", "-k", filepath.Join(repoRoot, "k8s"))
 
@@ -636,8 +625,7 @@ func (h *Harness) InstallOllie(repoRoot string) {
 	installState.failed = ""
 }
 
-// DeployTestWorkload loads the agnhost image and starts the echo
-// server + traffic client.
+// DeployTestWorkload starts the echo server + traffic client.
 func (h *Harness) DeployTestWorkload() {
 	h.t.Helper()
 	installState.Lock()
@@ -646,7 +634,6 @@ func (h *Harness) DeployTestWorkload() {
 		h.t.Log("test workload already deployed in the shared cluster; reusing")
 		return
 	}
-	h.PullAndLoad(AgnhostImage)
 	h.ApplyStdin(TestWorkloadManifest())
 	h.WaitRollout("deployment", "echo", "default", 2*time.Minute)
 	h.WaitRollout("deployment", "traffic-client", "default", 2*time.Minute)
@@ -823,7 +810,6 @@ func (h *Harness) DeployTLSOpenSSLWorkload() {
 		h.t.Log("tls-nginx workload already deployed in the shared cluster; reusing")
 		return
 	}
-	h.PullAndLoad(nginxImage)
 
 	// Self-signed serving cert for nginx. The client skips verification,
 	// so this only needs to be well-formed, not chained to a trusted CA.
@@ -873,7 +859,6 @@ spec:
       containers:
         - name: nginx
           image: %[1]s
-          imagePullPolicy: Never
           ports: [{containerPort: 8443}]
           volumeMounts:
             - name: conf
