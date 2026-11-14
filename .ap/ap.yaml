@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Pinned to the ap release that emits hash-pinned, zizmor-clean workflows
-# (gke-labs/gke-labs-infra#352). Keeps `ap generate` output deterministic so
-# ap-verify-generate stays byte-stable in CI.
-version: v0.0.0-20261113190754-7794ff3cd68f
+# Floats on the latest ap release on purpose. If a new ap turns a presubmit
+# red, regenerate with the latest ap or fix the new finding.
+version: latest
 generate:
   ignoreOrphans:
     - "opentelemetry/pkg/pb/*.pb.go"

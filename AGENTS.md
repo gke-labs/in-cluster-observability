@@ -103,6 +103,8 @@ The project uses [`ap`](https://github.com/gke-labs/gke-labs-infra/tree/main/ap)
 go run github.com/gke-labs/gke-labs-infra/ap@latest <command>
 ```
 
+`ap` floats on the latest build on purpose rather than pinning. If a new `ap` turns a presubmit red, regenerate with the latest `ap` (`ap generate //...`) or fix the new finding.
+
 | Task | Command |
 |---|---|
 | Generate files | `ap generate //...` |

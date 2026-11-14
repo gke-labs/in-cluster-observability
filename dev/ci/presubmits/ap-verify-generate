@@ -23,12 +23,12 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
 
 # Run generation in verify mode
-go run github.com/gke-labs/gke-labs-infra/ap@v0.0.0-20261113190754-7794ff3cd68f generate --verify //...
+go run github.com/gke-labs/gke-labs-infra/ap@latest generate --verify //...
 
 # Check for changes
 if [[ -n $(git status --porcelain) ]]; then
-  echo "Changes detected after running 'ap generate'. Run 'go run github.com/gke-labs/gke-labs-infra/ap@v0.0.0-20261113190754-7794ff3cd68f generate //...' and commit the result."
-  echo "<hint_for_agent>Run 'go run github.com/gke-labs/gke-labs-infra/ap@v0.0.0-20261113190754-7794ff3cd68f generate //...' to fix failures</hint_for_agent>"
+  echo "Changes detected after running 'ap generate'. Run 'go run github.com/gke-labs/gke-labs-infra/ap@latest generate //...' and commit the result."
+  echo "<hint_for_agent>Run 'go run github.com/gke-labs/gke-labs-infra/ap@latest generate //...' to fix failures</hint_for_agent>"
   git status
   exit 1
 fi
