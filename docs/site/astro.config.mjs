@@ -31,6 +31,8 @@ const BASE = '/in-cluster-observability';
 export default defineConfig({
   site: 'https://gke-labs.github.io',
   base: BASE,
+  // Keeps Starlight pre-0.43 zero-specificity scoping so theme.css overrides win; removing it needs a visual check of the site.
+  scopedStyleStrategy: 'where',
   markdown: {
     processor: unified({ remarkPlugins: [remarkPrependBase(BASE)] }),
   },
