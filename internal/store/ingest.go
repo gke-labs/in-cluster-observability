@@ -52,6 +52,7 @@ type Ingester struct {
 	// series, used to emit staleness markers (#191). Only Tick reads
 	// or writes it, and Run calls Tick sequentially.
 	prevSeries map[uint64]labels.Labels
+	lastTs     int64
 
 	samplesAppended prometheus.Counter
 	appendErrors    prometheus.Counter
@@ -120,7 +121,18 @@ func (ing *Ingester) Tick(ctx context.Context) {
 		ing.logger.Warn("store ingest: partial gather", "err", err)
 	}
 
+	// Ingester timestamps samples in milliseconds. Prometheus TSDB
+	// strictly requires monotonic timestamps per series; appending a
+	// duplicate or earlier timestamp returns an error and drops the
+	// sample. When two ticks happen within the same millisecond (such
+	// as rapid sequential calls in tests or clock adjustments), ensure
+	// timestamps advance monotonically so samples and staleness markers
+	// are not dropped (#301).
 	ts := time.Now().UnixMilli()
+	if ts <= ing.lastTs {
+		ts = ing.lastTs + 1
+	}
+	ing.lastTs = ts
 	app := ing.store.Appender(ctx)
 	var appended, failed int
 	cur := make(map[uint64]labels.Labels, len(ing.prevSeries))
