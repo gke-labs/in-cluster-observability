@@ -82,24 +82,27 @@ func TestIngesterTick(t *testing.T) {
 	}
 
 	// Self-obs metrics are registered on the same registry, so the
-	// next tick stores them too.
+	// next tick stores them too. Query at an evaluation timestamp after
+	// both ticks (within the lookback window) so the query does not depend
+	// on wall clock elapsed time between adjacent ticks (#301).
 	ing.Tick(t.Context())
-	vec := queryInstant(t, s, `ollie_store_samples_appended_total`, time.Now())
+	later := time.Now().Add(time.Second)
+	vec := queryInstant(t, s, `ollie_store_samples_appended_total`, later)
 	if len(vec) != 1 || vec[0].F <= 0 {
 		t.Errorf("ollie_store_samples_appended_total = %v, want > 0", vec)
 	}
-	vec = queryInstant(t, s, `ollie_store_active_series`, time.Now())
+	vec = queryInstant(t, s, `ollie_store_active_series`, later)
 	if len(vec) != 1 || vec[0].F <= 0 {
 		t.Errorf("ollie_store_active_series = %v, want > 0", vec)
 	}
 
 	// Every stored series carries the node identity so the query
 	// server's cross-node merge keeps per-node series distinct.
-	vec = queryInstant(t, s, `test_ingest_up{k8s_node_name="node-a"}`, time.Now())
+	vec = queryInstant(t, s, `test_ingest_up{k8s_node_name="node-a"}`, later)
 	if len(vec) != 1 || vec[0].F != 1 {
 		t.Errorf(`test_ingest_up{k8s_node_name="node-a"} = %v, want 1`, vec)
 	}
-	vec = queryInstant(t, s, `test_ingest_up{k8s_node_name="node-b"}`, time.Now())
+	vec = queryInstant(t, s, `test_ingest_up{k8s_node_name="node-b"}`, later)
 	if len(vec) != 0 {
 		t.Errorf(`test_ingest_up{k8s_node_name="node-b"} = %v, want empty`, vec)
 	}
