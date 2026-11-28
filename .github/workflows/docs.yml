@@ -13,10 +13,9 @@
 # limitations under the License.
 
 # Docs site: Astro Starlight under docs/site/ (go-steer convention,
-# mirrors go-steer/core-agent — see #182). npm-only toolchain, fully
-# pinned by package-lock.json; no build-time dependency resolution of
-# any kind (the Hugo-era `hugo mod get -u` upgraded the theme past the
-# repo's pin and broke the merge gate the day Docsy v0.16 shipped).
+# mirrors go-steer/core-agent — see #182). Built offline via the ap
+# Astro container plugin pinned in .ap/plugins.yaml (network: false);
+# no npm manifests or Node.js toolchain live in this repository.
 #
 # PRs run build + link/redirect verification only; push-to-main (and
 # manual dispatch) additionally deploy to GitHub Pages.
@@ -28,7 +27,7 @@ on:
     branches: [main]
     paths:
       - 'docs/site/**'
-      - 'ation/**'
+      - '.ap/plugins.yaml'
       - 'scripts/verify-internal-links.py'
       - 'scripts/verify-redirects.py'
       - 'scripts/generate-redirects.py'
@@ -37,7 +36,7 @@ on:
     branches: [main]
     paths:
       - 'docs/site/**'
-      - 'ation/**'
+      - '.ap/plugins.yaml'
       - 'scripts/verify-internal-links.py'
       - 'scripts/verify-redirects.py'
       - 'scripts/generate-redirects.py'
@@ -54,9 +53,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  NODE_VERSION: '22'
-
 jobs:
   build:
     name: build
@@ -69,34 +65,8 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Build docs-builder image
-        run: docker build -t docs-builder -f ation/images/ation/Dockerfile .
-
-      - name: Build ation
-        run: go build -C ation -o ../bin/ation .
-
-      - name: Build docs site with ation
-        run: ./bin/ation build -src docs/site -out docs/site/dist-ation -image docs-builder -exclude node_modules,dist,.astro
-
-      - name: Copy npm manifests for comparison build
-        run: cp ation/images/ation/package*.json docs/site/
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # ratchet:actions/setup-node@v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: ation/images/ation/package-lock.json
-
-      - name: Install (locked)
-        working-directory: docs/site
-        run: npm ci
-
-      - name: Build
-        working-directory: docs/site
-        run: npm run build
-
-      - name: Compare npm and ation builds
-        run: diff -r docs/site/dist docs/site/dist-ation
+      - name: Build docs site
+        run: go run github.com/gke-labs/gke-labs-infra/ap@latest build docs/site
 
       # The redirect stubs for legacy Hugo URLs are committed under
       # docs/site/public/ (regenerate with scripts/generate-redirects.py);

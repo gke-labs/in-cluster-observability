@@ -66,23 +66,6 @@ updates:
         patterns:
           - "*"
 
-  # Documentation site builder image (npm)
-  - package-ecosystem: "npm"
-    directory: "/ation/images/ation"
-    schedule:
-      interval: "daily"
-    cooldown:
-      default-days: 2
-    groups:
-      npm:
-        applies-to: version-updates
-        patterns:
-          - "*"
-      npm-security:
-        applies-to: security-updates
-        patterns:
-          - "*"
-
   # OpenTelemetry subtree Go module (separate ownership from root)
   - package-ecosystem: "gomod"
     directory: "/opentelemetry"
